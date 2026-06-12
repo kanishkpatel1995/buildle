@@ -2,6 +2,8 @@
 
 **One prompt. One world. Build together.**
 
+**Play it now → [buildle.zonivan.com](https://buildle.zonivan.com)** (or [buildle.vercel.app](https://buildle.vercel.app))
+
 Buildle is a daily building ritual that lives in your browser. Every day there's one prompt — "build something cozy", "build your breakfast" — and one shared plaza floating above a sea of sunset clouds. You wander in as a tiny voxel person, place blocks from a sixteen-color palette tuned to the golden hour, leave a small note for whoever comes next, and keep a streak going one day at a time. Think Wordle's daily ritual, Minecraft's blocks, and r/place's shared canvas, wearing Monument Valley's light.
 
 A few things make it feel alive:
