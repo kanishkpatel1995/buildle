@@ -11,7 +11,7 @@ import { getDayNumber } from './prompts.js';
 
 // ── constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_API = '';
+const DEFAULT_API = 'https://buildle-api.buildle.workers.dev';
 const API_KEY = 'buildle_api_v1';
 const DEVICE_KEY = 'buildle_device_v1';
 

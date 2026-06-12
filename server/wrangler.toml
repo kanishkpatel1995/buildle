@@ -2,8 +2,9 @@ name = "buildle-api"
 main = "src/worker.js"
 compatibility_date = "2026-05-01"
 
-[vars]
-TOKEN_SECRET = "dev-secret-change-me"
+# TOKEN_SECRET is a real secret: production gets it via `wrangler secret put
+# TOKEN_SECRET`; local dev reads .dev.vars (git-ignored). Never put it here —
+# a [vars] entry would shadow the secret on every deploy.
 
 [[durable_objects.bindings]]
 name = "PLAZA"

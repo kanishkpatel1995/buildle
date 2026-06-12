@@ -1,0 +1,9 @@
+.claude/
+server/
+node_modules/
+.env*
+*.md
+!README.md
+.vercel/
+.git
+LICENSE
