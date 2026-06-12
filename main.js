@@ -10,6 +10,7 @@ import { music } from './music.js';
 import { Views } from './views.js';
 import { capture } from './capture.js';
 import { Gardener } from './bot.js';
+import { createSync } from './sync.js';
 import { getToday } from './prompts.js';
 import { storageAvailable, loadWorld, saveWorld, loadPlayer, savePlayer } from './storage.js';
 
@@ -397,6 +398,24 @@ player.onFootstep = (alt) => audio.step(alt);
 
 const views = new Views(player, { reducedMotion });
 
+// Shared-plaza sync — dormant until an API base is configured (sync.js).
+// Remote placements ring softly through the song of the day.
+const DENIED_TOASTS = {
+  budget: 'out of blocks for a moment — they regrow',
+  protected: "the gardens can't be built on",
+  occupied: 'someone built there first',
+  missing: 'someone already cleared that',
+};
+const sync = createSync({
+  world,
+  getName: () => profile.name || defaultName,
+  onRemoteEdit: (y, c) => music.notePlaced(y, c, true),
+  onDenied: (reason) => { if (DENIED_TOASTS[reason]) ui.toast(DENIED_TOASTS[reason]); },
+  onDay: () => refreshDay(),
+  onStatus: () => {},
+});
+sync.start();
+
 // Audio + the song of the day both wake on the first user gesture.
 function ensureAudioAndMusic() {
   audio.ensure();
@@ -489,7 +508,9 @@ async function attemptPlace(clientX, clientY) {
       ui.toast('too far away — walk closer');
       return;
     }
-    if (world.place(x, y, z, GLOW_INDEX, { m: text.trim().slice(0, 140), n: profile.name })) {
+    const noteText = text.trim().slice(0, 140);
+    if (world.place(x, y, z, GLOW_INDEX, { m: noteText, n: profile.name })) {
+      sync.sendPlace(x, y, z, GLOW_INDEX, { m: noteText });
       audio.place();
       music.duck();
       music.notePlaced(y, GLOW_INDEX);
@@ -500,6 +521,7 @@ async function attemptPlace(clientX, clientY) {
       bumpStreak();
     }
   } else if (world.place(x, y, z, selectedColor)) {
+    sync.sendPlace(x, y, z, selectedColor);
     audio.place();
     music.duck();
     music.notePlaced(y, selectedColor);
@@ -518,7 +540,9 @@ function attemptRemove(clientX, clientY) {
   if (!hit.inRange) { ui.toast('too far away — walk closer'); return; }
   const { x, y, z } = hit.removeCell;
   if (!world.canRemove(x, y, z)) { ui.toast("that one's part of the island"); return; }
+  const prev = world.get(x, y, z);
   if (world.remove(x, y, z)) {
+    sync.sendRemove(x, y, z, prev && { c: prev.c, m: prev.m, n: prev.n });
     audio.remove();
     music.duck();
   }
@@ -735,7 +759,10 @@ function scheduleSave() {
   saveTimer = setTimeout(flushSave, SAVE_DEBOUNCE_MS);
 }
 world.onChange = scheduleSave;
-window.addEventListener('pagehide', () => { if (saveTimer) flushSave(); });
+window.addEventListener('pagehide', () => {
+  if (saveTimer) flushSave();
+  sync.flush();
+});
 
 function displayedStreak() {
   if (!storageAvailable) return 0;
@@ -906,6 +933,7 @@ async function helpFlow() {
   profile.helpSeen = true;
   savePlayer(profile);
   player.setName(profile.name);
+  sync.setName(profile.name);
   ensureAudioAndMusic();   // the overlay dismissal is a user gesture
 }
 

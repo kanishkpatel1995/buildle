@@ -1,0 +1,15 @@
+{
+  "name": "buildle-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "obscenity": "^0.4.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

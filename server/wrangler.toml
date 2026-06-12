@@ -1,0 +1,14 @@
+name = "buildle-api"
+main = "src/worker.js"
+compatibility_date = "2026-05-01"
+
+[vars]
+TOKEN_SECRET = "dev-secret-change-me"
+
+[[durable_objects.bindings]]
+name = "PLAZA"
+class_name = "IslandDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["IslandDO"]

@@ -82,8 +82,8 @@ Placement reaches six blocks from your character, so you'll do some walking. Tha
 
 ## Roadmap
 
-- **Phase 1 — the ritual** (you are here): one shared-looking world, daily prompts, building, message blocks, streaks, share cards. Saved locally in your browser.
-- **Phase 2 — shared persistence**: swap `storage.js` for a small API so everyone's blocks land in the same world for real.
+- **Phase 1 — the ritual**: daily prompts, building, message blocks, streaks, share cards. Saved locally in your browser.
+- **Phase 2 — shared persistence** (built, awaiting deploy): a Cloudflare Worker + Durable Object backend lives in [`server/`](server/) — one shared world, polled sync, charge meter, daily reset with archives. The game ships with the sync adapter dormant; deploying the worker and setting its URL in `sync.js` turns the plaza truly shared.
 - **Phase 3 — live multiplayer**: see other wanderers walking and building around you in real time.
 - **Phase 4 — billboards + Vibeverse portal**: a few tasteful in-world billboards, and a portal to hop between worlds in the Vibeverse.
 

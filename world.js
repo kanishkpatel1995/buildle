@@ -327,6 +327,32 @@ const HANGING_ROCKS = [
   [5, -10.6, 8, 1.0],
 ];
 
+// The plaza's seed content + protection as plain JSON-ready data — what a
+// fresh shared world is born with. Pure and deterministic: every client
+// derives the identical payload, so whoever seeds the server first is moot.
+export function plazaSeedPayload() {
+  const blocks = {};
+  forEachTreeBlock((x, y, z, c) => { blocks[key(x, y, z)] = { c }; });
+  for (const [x, y, z] of HOUSE_BLOCKS) blocks[key(x, y, z)] = { c: 2 };
+  blocks[key(HOUSE_MESSAGE.x, HOUSE_MESSAGE.y, HOUSE_MESSAGE.z)] = {
+    c: GLOW_INDEX, m: HOUSE_MESSAGE.m, n: HOUSE_MESSAGE.n,
+  };
+  for (const [x, y, z, c] of SCATTER_BLOCKS) blocks[key(x, y, z)] = { c };
+
+  const protectedColumns = new Set(PATH_SET);
+  forEachPondCell((x, z) => protectedColumns.add(colKey(x, z)));
+  for (const [tx, tz] of TREES) protectedColumns.add(colKey(tx, tz));
+  const protectedBlocks = [];
+  forEachTreeBlock((x, y, z) => protectedBlocks.push(key(x, y, z)));
+  protectedBlocks.push(key(HOUSE_MESSAGE.x, HOUSE_MESSAGE.y, HOUSE_MESSAGE.z));
+
+  return {
+    blocks,
+    protectedColumns: [...protectedColumns],
+    protectedBlocks,
+  };
+}
+
 // ---------------------------------------------------------------------------
 
 // Every public method takes and returns GLOBAL integer coordinates; block map
@@ -523,17 +549,21 @@ export class World {
 
   // Bounds-checked placement that skips buildable/protection rules — the
   // gardener bot's animated placements. Never overwrites, never fires onChange.
-  forcePlace(x, y, z, colorIndex) {
+  forcePlace(x, y, z, colorIndex, extra = {}) {
     const lx = x - this.origin.x, lz = z - this.origin.z;
     if (!this._inBoundsLocal(lx, y, lz)) return false;
     const k = key(lx, y, lz);
     if (this.blocks.has(k)) return false;
     const c = Math.min(15, Math.max(0, colorIndex | 0));
-    this.blocks.set(k, { c });
+    const entry = { c };
+    if (typeof extra.m === 'string' && extra.m) entry.m = extra.m.slice(0, 140);
+    if (typeof extra.n === 'string' && extra.n) entry.n = extra.n;
+    this.blocks.set(k, entry);
     this._chunkKeys[this._chunkIndex(lx, lz)].add(k);
     this._killPopAt(lx, y, lz);
     if (!this.reducedMotion) this._startPop(k, lx, y, lz, c, 'in');
     this._rebuildCellChunks(lx, y, lz);
+    if (entry.m) this._addEnvelope(k, lx, y, lz);
     this.spawnBurst(this._tmpVec.set(x + 0.5, y + 0.5, z + 0.5), PALETTE[c].hex, BURST_PLACE);
     return true;
   }
