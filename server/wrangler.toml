@@ -2,6 +2,13 @@ name = "buildle-api"
 main = "src/worker.js"
 compatibility_date = "2026-05-01"
 
+# Workers Logs: persistent invocation logs + query builder in the dashboard.
+# Free plan includes 200k events/day with 3-day retention — plenty at launch
+# scale; drop head_sampling_rate if we ever approach the cap.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # TOKEN_SECRET is a real secret: production gets it via `wrangler secret put
 # TOKEN_SECRET`; local dev reads .dev.vars (git-ignored). Never put it here —
 # a [vars] entry would shadow the secret on every deploy.
