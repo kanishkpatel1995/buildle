@@ -899,7 +899,7 @@ async function clipFlow() {
     return;
   }
   const shareText = `buildle day ${TODAY.day} · "${TODAY.prompt}"` +
-    (displayedStreak() > 0 ? ` · 🔥${displayedStreak()}` : '') + ' · buildle.vercel.app';
+    (displayedStreak() > 0 ? ` · 🔥${displayedStreak()}` : '') + ' · buildle.zonivan.com';
   const file = new File([result.blob], result.filename, { type: result.mimeType });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
