@@ -21,7 +21,14 @@ const SPAWN_YAW = Math.PI;       // facing north (-z), toward the center
 
 // ── Camera rig ──────────────────────────────────────────────────────────────
 const CAM_FOV = 50, CAM_NEAR = 0.1, CAM_FAR = 1000;
-const CAM_DIST = 10.5, CAM_DIST_MIN = 4, CAM_DIST_MAX = 18;
+const CAM_DIST = 10.5, CAM_DIST_MIN = 4, CAM_DIST_MAX = 90;
+// Dolly-zoom: orbiting out past walking range narrows the FOV toward the
+// near-orthographic look, so whole islands stay framed. Never engages below
+// DOLLY_DIST_MIN — ordinary walking and building never pump.
+const DOLLY_DIST_MIN = 20, DOLLY_DIST_MAX = 90;
+const DOLLY_FOV_DROP = 27.5;     // 50° at ≤20u → 22.5° at 90u
+const DOLLY_EASE = 6;            // fov easing rate (1/s)
+const DOLLY_FOV_EPS = 0.05;      // skip updateProjectionMatrix below this delta
 const CAM_PITCH = 0.18, CAM_PITCH_MIN = 0.08, CAM_PITCH_MAX = 1.25;
 const CAM_TARGET_UP = 1.2;       // orbit target = feet + this
 const CAM_DAMP = 5;              // follow damping: 1 - exp(-CAM_DAMP * dt)
@@ -281,6 +288,16 @@ export class Player {
       : 1;
     this._eyeL.scale.y = eyeY;
     this._eyeR.scale.y = eyeY;
+
+    // Dolly-zoom: ease the FOV toward its distance target; reproject only on
+    // meaningful change so the matrix never churns at rest.
+    const zs = clamp((this._dist - DOLLY_DIST_MIN) / (DOLLY_DIST_MAX - DOLLY_DIST_MIN), 0, 1);
+    const targetFov = CAM_FOV - DOLLY_FOV_DROP * zs * zs * (3 - 2 * zs);
+    const fovNext = this.camera.fov + (targetFov - this.camera.fov) * (1 - Math.exp(-DOLLY_EASE * dt));
+    if (Math.abs(fovNext - this.camera.fov) > DOLLY_FOV_EPS) {
+      this.camera.fov = fovNext;
+      this.camera.updateProjectionMatrix();
+    }
 
     // Damped third-person follow; orbit inputs steer the desired pose,
     // the camera glides toward it and never snaps. While views.js drives the

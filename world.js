@@ -117,7 +117,8 @@ const FACE_PZ = FACES[4];
 const FACE_NZ = FACES[5];
 
 // Accumulates shaded vertex-colored quads, then bakes one indexed BufferGeometry.
-class GeoBuilder {
+// Exported for islands.js — showcase islands build sub-voxel decor with it.
+export class GeoBuilder {
   constructor() {
     this.pos = [];
     this.nrm = [];
@@ -219,6 +220,15 @@ function inPond(x, z) {
   const dx = x + 0.5 - POND_CENTER[0];
   const dz = z + 0.5 - POND_CENTER[1];
   return Math.hypot(dx, dz) <= POND_RADIUS + (hash2(x, z) - 0.5) * POND_WOBBLE;
+}
+
+// The plaza pond footprint as [x, z] cell pairs (global == local here — the
+// plaza's origin is 0,0). Pure derivation from the pond constants; main.js
+// floats the living water surface over this rect.
+export function plazaPondCells() {
+  const cells = [];
+  forEachPondCell((x, z) => cells.push([x, z]));
+  return cells;
 }
 
 function forEachPondCell(fn) {
@@ -579,6 +589,41 @@ export class World {
       this._chunkKeys[this._chunkIndex(lx, lz)].add(k);
     }
     for (let ci = 0; ci < this._chunks.length; ci++) this._rebuildChunk(ci);
+  }
+
+  // Like setBlocksBulk, but the chunk rebuilds are paced: every entry lands in
+  // the map immediately (cheap), then at most msPerFrame of meshing runs per
+  // animation frame. Resolves once every dirty chunk is built. Bulk = no pops,
+  // no particles, no onChange.
+  setBlocksBulkPaced(entries, msPerFrame = 6) {
+    const dirty = new Set();
+    for (const [x, y, z, colorIndex] of entries) {
+      const lx = x - this.origin.x, lz = z - this.origin.z;
+      if (!this._inBoundsLocal(lx, y, lz)) continue;
+      const k = key(lx, y, lz);
+      this.blocks.set(k, { c: Math.min(15, Math.max(0, colorIndex | 0)) });
+      this._chunkKeys[this._chunkIndex(lx, lz)].add(k);
+      dirty.add(this._chunkIndex(lx, lz));
+      // border cells re-cull the face-adjacent neighbor chunk too
+      const bx = (lx - this._min) & (CHUNK_SIZE - 1);
+      const bz = (lz - this._min) & (CHUNK_SIZE - 1);
+      if (bx === 0 && lx > this._min) dirty.add(this._chunkIndex(lx - 1, lz));
+      if (bx === CHUNK_SIZE - 1 && lx < this._max) dirty.add(this._chunkIndex(lx + 1, lz));
+      if (bz === 0 && lz > this._min) dirty.add(this._chunkIndex(lx, lz - 1));
+      if (bz === CHUNK_SIZE - 1 && lz < this._max) dirty.add(this._chunkIndex(lx, lz + 1));
+    }
+    const queue = [...dirty];
+    return new Promise((resolve) => {
+      const step = () => {
+        const t0 = performance.now();
+        while (queue.length > 0 && performance.now() - t0 < msPerFrame) {
+          this._rebuildChunk(queue.pop());
+        }
+        if (queue.length === 0) resolve();
+        else requestAnimationFrame(step);
+      };
+      step();
+    });
   }
 
   pick(raycaster, playerCenter) {

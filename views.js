@@ -14,13 +14,14 @@ const ORBIT_SENS = 0.005;         // radians per pixel
 const ZOOM_SCALE = 0.001;         // wheel delta → distance factor
 
 // ── Photo mode ───────────────────────────────────────────────────────────
-const PHOTO_DIST_MIN = 4, PHOTO_DIST_MAX = 40;
+const PHOTO_DIST_MIN = 4, PHOTO_DIST_MAX = 90;
 const PHOTO_PITCH_MIN = 0.05, PHOTO_PITCH_MAX = 1.35;
 const PHOTO_IDLE_S = 8;           // seconds without input before auto-drift
 const PHOTO_DRIFT = 0.03;         // rad/s
 
 // ── Sky view ─────────────────────────────────────────────────────────────
 const SKY_DIST = 46;
+const SKY_DIST_MIN = 30, SKY_DIST_MAX = 140;   // sky view zoom range
 const SKY_PITCH = 1.15;
 const SKY_ORBIT = 0.05;           // rad/s
 
@@ -160,9 +161,13 @@ export class Views {
   }
 
   zoom(delta) {
-    if (this.mode !== 'photo' || this._driven) return;
-    this._dist = clamp(this._dist * (1 + delta * ZOOM_SCALE), PHOTO_DIST_MIN, PHOTO_DIST_MAX);
-    this._idleT = 0;
+    if (this._driven) return;
+    if (this.mode === 'photo') {
+      this._dist = clamp(this._dist * (1 + delta * ZOOM_SCALE), PHOTO_DIST_MIN, PHOTO_DIST_MAX);
+      this._idleT = 0;
+    } else if (this.mode === 'sky') {
+      this._dist = clamp(this._dist * (1 + delta * ZOOM_SCALE), SKY_DIST_MIN, SKY_DIST_MAX);
+    }
   }
 
   // → { getPose(u, outPos, outLook) }, u ∈ [0,1]. Paths start near the current

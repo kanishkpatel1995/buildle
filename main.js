@@ -2,7 +2,8 @@
 // Bootstrap, environment, input, wiring, loop (CONTRACT §8).
 
 import * as THREE from 'three';
-import { World, PALETTE, GLOW_INDEX, WORLD_MIN, WORLD_MAX, WORLD_HEIGHT, PLACE_RANGE } from './world.js';
+import { World, PALETTE, GLOW_INDEX, WORLD_MIN, WORLD_MAX, WORLD_HEIGHT, PLACE_RANGE, plazaPondCells } from './world.js';
+import { water } from './water.js';
 import { Player } from './player.js';
 import { ui } from './ui.js';
 import { audio } from './audio.js';
@@ -17,7 +18,12 @@ import { storageAvailable, loadWorld, saveWorld, loadPlayer, savePlayer } from '
 // ── tunables ────────────────────────────────────────────────────────────────
 
 const FOG_COLOR = '#E8A87C';
-const FOG_DENSITY = 0.0135;
+const FOG_DENSITY = 0.0135;                   // the MAX/near density — zooming out eases it down
+const FOG_COMP_NEAR = 35;                     // full density inside this camera-to-player distance
+const FOG_DENSITY_MIN = 0.0026;               // far-zoom floor — islands stay readable at dist 90+
+const FOG_COMP_RATE = 4;                      // density easing rate (1/s)
+
+const POND_SURFACE_Y = -0.12;                 // living water sits just above the painted recess
 
 const SKY_RADIUS = 500;
 const SKY_ZENITH = '#3D2C5A';                 // deep dusk plum
@@ -373,6 +379,28 @@ function updateEnvironment(dt, t) {
 const world = new World(scene, { reducedMotion });
 world.load(loadWorld());
 
+// The plaza pond gains a living water surface, floated over the bounding rect
+// of the pond cells; everything outside the footprint counts as land so the
+// foam rings hug the painted shoreline.
+{
+  const pondCells = plazaPondCells();
+  const pondSet = new Set(pondCells.map(([x, z]) => x + ',' + z));
+  let px0 = Infinity, px1 = -Infinity, pz0 = Infinity, pz1 = -Infinity;
+  for (const [x, z] of pondCells) {
+    if (x < px0) px0 = x;
+    if (x > px1) px1 = x;
+    if (z < pz0) pz0 = z;
+    if (z > pz1) pz1 = z;
+  }
+  scene.add(water.makeSurface({
+    width: px1 - px0 + 1,
+    depth: pz1 - pz0 + 1,
+    level: POND_SURFACE_Y,
+    origin: { x: (px0 + px1 + 1) / 2, z: (pz0 + pz1 + 1) / 2 },
+    isLand: (x, z) => !pondSet.has(x + ',' + z),
+  }));
+}
+
 // The gardener's island: unseeded, unbuildable, watched over by the bot.
 const botWorld = new World(scene, {
   reducedMotion,
@@ -388,6 +416,26 @@ gardener.onPlace = (y, c) => music.notePlaced(y, c, true);
 
 let activeWorld = world;
 let traveling = false;
+
+// TEMP — W1 dev hook (removed in W3 when the voyage lands). With
+// localStorage.buildle_testisle = '1' the showcase pipeline goes live: the
+// proving ground loads lazily, the impostor baker runs once, and the compass
+// cycle becomes plaza → gardener → proving ground → plaza. Without the flag
+// nothing here executes and travel stays exactly as shipped.
+let testIsle = null;
+(async () => {
+  let flagged = false;
+  try { flagged = localStorage.getItem('buildle_testisle') === '1'; } catch { /* storage may be walled off */ }
+  if (!flagged) return;
+  const { loadShowcase, bakeImpostor } = await import('./islands.js');
+  const isle = await loadShowcase('test-isle', scene, { reducedMotion });
+  // bake once to exercise the pipeline end to end; the live island is already
+  // in the scene, so keeping the billboard would double-draw — release it
+  const impostor = bakeImpostor(renderer, scene, isle);
+  impostor.material.map.dispose();
+  impostor.material.dispose();
+  testIsle = isle;
+})();
 
 const player = new Player(scene, world, {
   name: profile.name || defaultName,
@@ -840,13 +888,25 @@ function openViewsMenu() {
 }
 
 // Plaza ⇄ the gardener's island: the camera leads the way, the player follows.
+// The W1 dev flag splices the proving ground in after the gardener's isle.
 async function travel() {
   if (traveling || capture.busy || modalOpen) return;
   traveling = true;
   setViewModeSafe('follow');
-  const toGarden = activeWorld === world;
-  const dest = toGarden ? GARDEN_STAND : PLAZA_STAND;
-  const destWorld = toGarden ? botWorld : world;
+  let dest, destWorld, arrival;
+  if (activeWorld === world) {
+    dest = GARDEN_STAND;
+    destWorld = botWorld;
+    arrival = "the gardener's island — look, don't touch";
+  } else if (activeWorld === botWorld && testIsle) {
+    dest = testIsle.dockSpawn;
+    destWorld = testIsle.world;
+    arrival = "the proving ground — look, don't touch";
+  } else {
+    dest = PLAZA_STAND;
+    destWorld = world;
+    arrival = 'back to the plaza';
+  }
   audio.ui();
   views.setMode('photo', { center: new THREE.Vector3(dest.x, 2.5, dest.z) });
   await sleep(TRAVEL_GLIDE_MS);
@@ -858,7 +918,7 @@ async function travel() {
   await sleep(TRAVEL_SETTLE_MS);
   views.setMode('follow');
   traveling = false;
-  ui.toast(toGarden ? "the gardener's island — look, don't touch" : 'back to the plaza');
+  ui.toast(arrival);
 }
 
 // setViewMode without the traveling guard — travel() manages its own camera.
@@ -1026,11 +1086,19 @@ function tick() {
   }
   world.update(dt, t);
   botWorld.update(dt, t);
+  if (testIsle) testIsle.world.update(dt, t);
   gardener.update(dt, t);
   player.update(dt, t);
   views.update(dt, t);
+  water.update(dt);
   updateEnvironment(dt, t);
   updateGhost(t);
+  // Distance-compensated fog: the camera pulling away from the player eases
+  // the density down, so a zoomed-out island never drowns in the haze.
+  const fogDist = player.camera.position.distanceTo(player.position);
+  const fogTarget = Math.min(FOG_DENSITY, Math.max(FOG_DENSITY_MIN,
+    FOG_DENSITY * (FOG_COMP_NEAR / Math.max(fogDist, FOG_COMP_NEAR))));
+  scene.fog.density += (fogTarget - scene.fog.density) * (1 - Math.exp(-FOG_COMP_RATE * dt));
   if (!contextLost) renderer.render(scene, player.camera);
   if (firstFrame) {
     firstFrame = false;
