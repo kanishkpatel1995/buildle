@@ -12,7 +12,12 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600&family=Nunito:ital,wght@0,400;0,600;0,700;1,600&display=swap" />
   <link rel="stylesheet" href="./style.css" />
   <script type="importmap">
-    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "tone": "https://cdn.jsdelivr.net/npm/tone@15.1.22/+esm"
+      }
+    }
   </script>
 </head>
 <body>
@@ -39,6 +44,23 @@
           <circle cx="10" cy="10.9" r="3" />
         </svg>
       </button>
+      <button id="btn-views" class="round-btn" type="button" title="views" aria-label="camera views">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="10" cy="10" r="7.6" />
+          <path d="m11.76 6.96 4.36 7.55" />
+          <path d="M8.24 6.96h8.73" />
+          <path d="m6.49 10 4.36-7.55" />
+          <path d="M8.24 14.56 3.88 7.01" />
+          <path d="M11.76 14.56H3.03" />
+          <path d="m13.51 10-4.36 7.55" />
+        </svg>
+      </button>
+      <button id="btn-compass" class="round-btn" type="button" title="travel" aria-label="travel between islands">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="10" cy="10" r="7.6" />
+          <polygon points="13.22 6.78 11.61 11.61 6.78 13.22 8.39 8.39" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
       <button id="btn-sound" class="round-btn" type="button" title="sound" aria-label="toggle sound">
         <svg class="icon-sound-on" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M3.4 7.8v4.4h2.8l3.9 3.2V4.6L6.2 7.8H3.4Z" fill="currentColor" stroke="none" />
@@ -58,6 +80,18 @@
   </div>
 
   <div id="joystick" aria-hidden="true"><div id="joystick-knob"></div></div>
+
+  <div id="share-menu" class="mini-menu hidden" role="menu" aria-label="share"></div>
+  <div id="views-menu" class="mini-menu hidden" role="menu" aria-label="camera views"></div>
+
+  <div id="tilt-top" class="tilt-band" aria-hidden="true"></div>
+  <div id="tilt-bottom" class="tilt-band" aria-hidden="true"></div>
+  <button id="photo-exit" class="hidden" type="button">tap to return</button>
+
+  <div id="filming" class="hidden" aria-hidden="true">
+    <div id="filming-frame"></div>
+    <div id="filming-caption">filming your island…</div>
+  </div>
 
   <div id="toast" role="status" aria-live="polite"></div>
 

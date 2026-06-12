@@ -2,7 +2,7 @@
 // movement, collision, and the tiny animations that make them feel alive.
 
 import * as THREE from 'three';
-import { PALETTE, isGround, WORLD_HEIGHT } from './world.js';
+import { PALETTE, WORLD_HEIGHT } from './world.js';
 
 // ── Movement & physics ──────────────────────────────────────────────────────
 const MOVE_SPEED = 4.3;          // u/s
@@ -41,6 +41,60 @@ const LABEL_Y = 2.05;            // ~0.6 above the head
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
+// Builds the little wanderer mesh — shared by the Player and any NPC (the
+// gardener). The returned group is NOT added to any scene; the rig inside it
+// holds every animated part so a walk bob can move the whole character while
+// group.position stays the clean physics foot point. All parts cast shadows.
+export function createCharacter({ bodyColorIndex, headHex = HEAD_HEX } = {}) {
+  const valid = Number.isInteger(bodyColorIndex)
+    && bodyColorIndex >= 0 && bodyColorIndex < PALETTE.length;
+  const idx = valid ? bodyColorIndex : 1 + Math.floor(Math.random() * 14); // a mid-tone, never glow
+  const bodyHex = PALETTE[idx].hex;
+
+  const headMat = new THREE.MeshLambertMaterial({ color: headHex });
+  const eyeMat = new THREE.MeshLambertMaterial({ color: EYE_HEX });
+  const bodyMat = new THREE.MeshLambertMaterial({ color: bodyHex });
+  const legMat = new THREE.MeshLambertMaterial({
+    color: new THREE.Color(bodyHex).multiplyScalar(LEG_DARKEN),
+  });
+
+  const group = new THREE.Group();
+  const rig = new THREE.Group();
+  group.add(rig);
+
+  const legGeo = new THREE.BoxGeometry(0.13, 0.36, 0.14).translate(0, -0.18, 0);
+  const legL = new THREE.Mesh(legGeo, legMat);
+  legL.position.set(-0.105, 0.36, 0);
+  const legR = new THREE.Mesh(legGeo, legMat);
+  legR.position.set(0.105, 0.36, 0);
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(0.4, 0.56, 0.26).translate(0, 0.28, 0), bodyMat);
+  body.position.y = 0.33;
+
+  const armGeo = new THREE.BoxGeometry(0.11, 0.34, 0.12).translate(0, -0.17, 0);
+  const armL = new THREE.Mesh(armGeo, bodyMat);
+  armL.position.set(-0.26, 0.84, 0);
+  const armR = new THREE.Mesh(armGeo, bodyMat);
+  armR.position.set(0.26, 0.84, 0);
+
+  // Head: slightly wider than the body on purpose. Eyes sit proud of the
+  // local +z face, which is the direction the character walks.
+  const head = new THREE.Group();
+  head.position.y = 1.16;
+  const headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.52), headMat);
+  const eyeGeo = new THREE.BoxGeometry(0.075, 0.1, 0.03);
+  const eyeL = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeL.position.set(-0.115, 0.02, 0.265);
+  const eyeR = new THREE.Mesh(eyeGeo, eyeMat);
+  eyeR.position.set(0.115, 0.02, 0.265);
+  head.add(headMesh, eyeL, eyeR);
+
+  rig.add(legL, legR, body, armL, armR, head);
+  rig.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  return { group, rig, legL, legR, armL, armR, body, head, eyeL, eyeR };
+}
+
 export class Player {
   constructor(scene, world, { name, bodyColorIndex, reducedMotion = false }) {
     this.world = world;
@@ -51,6 +105,7 @@ export class Player {
     this.group = new THREE.Group();
     this.position = this.group.position;
     this.onFootstep = null;
+    this.externalCamera = false; // true → views.js drives the camera, not update()
 
     // Physics state. group.position.y is the eased visual foot height;
     // _physY is the authoritative one collision runs against.
@@ -112,6 +167,11 @@ export class Player {
   setName(name) {
     this._name = String(name ?? '').trim() || 'wanderer';
     this._drawLabel();
+  }
+
+  // Swap the collision world (island travel). Coordinates stay global.
+  setWorld(world) {
+    this.world = world;
   }
 
   getCenter() {
@@ -223,12 +283,18 @@ export class Player {
     this._eyeR.scale.y = eyeY;
 
     // Damped third-person follow; orbit inputs steer the desired pose,
-    // the camera glides toward it and never snaps.
-    this._desiredCamera(this._desired);
-    const k = 1 - Math.exp(-CAM_DAMP * dt);
-    this.camera.position.lerp(this._desired, k);
-    this._look.lerp(this._tmp.set(gp.x, gp.y + CAM_TARGET_UP, gp.z), k);
-    this.camera.lookAt(this._look);
+    // the camera glides toward it and never snaps. While views.js drives the
+    // camera, only the look target keeps tracking the player so handing
+    // control back lands exactly where the follow rig expects.
+    if (this.externalCamera) {
+      this._look.set(gp.x, gp.y + CAM_TARGET_UP, gp.z);
+    } else {
+      this._desiredCamera(this._desired);
+      const k = 1 - Math.exp(-CAM_DAMP * dt);
+      this.camera.position.lerp(this._desired, k);
+      this._look.lerp(this._tmp.set(gp.x, gp.y + CAM_TARGET_UP, gp.z), k);
+      this.camera.lookAt(this._look);
+    }
   }
 
   _desiredCamera(out) {
@@ -270,7 +336,7 @@ export class Player {
     const y0 = Math.floor(py + COLL_EPS), y1 = Math.floor(py + AABB_HEIGHT - COLL_EPS);
     for (let cx = x0; cx <= x1; cx++) {
       for (let cz = z0; cz <= z1; cz++) {
-        if (!isGround(cx, cz) && !this._hasSupport(cx, cz, y0)) return true;
+        if (!this.world.isGroundAt(cx, cz) && !this._hasSupport(cx, cz, y0)) return true;
         for (let cy = y0; cy <= y1; cy++) {
           if (this.world.isSolid(cx, cy, cz)) return true;
         }
@@ -299,53 +365,19 @@ export class Player {
   }
 
   _buildBody(bodyColorIndex) {
-    const valid = Number.isInteger(bodyColorIndex)
-      && bodyColorIndex >= 0 && bodyColorIndex < PALETTE.length;
-    const idx = valid ? bodyColorIndex : 1 + Math.floor(Math.random() * 14); // a mid-tone, never glow
-    const bodyHex = PALETTE[idx].hex;
-
-    const headMat = new THREE.MeshLambertMaterial({ color: HEAD_HEX });
-    const eyeMat = new THREE.MeshLambertMaterial({ color: EYE_HEX });
-    const bodyMat = new THREE.MeshLambertMaterial({ color: bodyHex });
-    const legMat = new THREE.MeshLambertMaterial({
-      color: new THREE.Color(bodyHex).multiplyScalar(LEG_DARKEN),
-    });
-
-    // The rig holds every part so the walk bob moves the whole character
-    // while group.position stays the clean physics foot point.
-    this._rig = new THREE.Group();
+    const c = createCharacter({ bodyColorIndex });
+    this._rig = c.rig;
+    this._legL = c.legL;
+    this._legR = c.legR;
+    this._body = c.body;
+    this._armL = c.armL;
+    this._armR = c.armR;
+    this._head = c.head;
+    this._eyeL = c.eyeL;
+    this._eyeR = c.eyeR;
+    // Adopt the rig directly — same hierarchy as before the extraction
+    // (group → rig); createCharacter's wrapper group is discarded.
     this.group.add(this._rig);
-
-    const legGeo = new THREE.BoxGeometry(0.13, 0.36, 0.14).translate(0, -0.18, 0);
-    this._legL = new THREE.Mesh(legGeo, legMat);
-    this._legL.position.set(-0.105, 0.36, 0);
-    this._legR = new THREE.Mesh(legGeo, legMat);
-    this._legR.position.set(0.105, 0.36, 0);
-
-    this._body = new THREE.Mesh(
-      new THREE.BoxGeometry(0.4, 0.56, 0.26).translate(0, 0.28, 0), bodyMat);
-    this._body.position.y = 0.33;
-
-    const armGeo = new THREE.BoxGeometry(0.11, 0.34, 0.12).translate(0, -0.17, 0);
-    this._armL = new THREE.Mesh(armGeo, bodyMat);
-    this._armL.position.set(-0.26, 0.84, 0);
-    this._armR = new THREE.Mesh(armGeo, bodyMat);
-    this._armR.position.set(0.26, 0.84, 0);
-
-    // Head: slightly wider than the body on purpose. Eyes sit proud of the
-    // local +z face, which is the direction the character walks.
-    this._head = new THREE.Group();
-    this._head.position.y = 1.16;
-    const headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.52), headMat);
-    const eyeGeo = new THREE.BoxGeometry(0.075, 0.1, 0.03);
-    this._eyeL = new THREE.Mesh(eyeGeo, eyeMat);
-    this._eyeL.position.set(-0.115, 0.02, 0.265);
-    this._eyeR = new THREE.Mesh(eyeGeo, eyeMat);
-    this._eyeR.position.set(0.115, 0.02, 0.265);
-    this._head.add(headMesh, this._eyeL, this._eyeR);
-
-    this._rig.add(this._legL, this._legR, this._body, this._armL, this._armR, this._head);
-    this._rig.traverse((o) => { if (o.isMesh) o.castShadow = true; });
   }
 
   _buildLabel(name) {

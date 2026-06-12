@@ -60,6 +60,7 @@ const MILESTONE_LOWPASS = 2200;
 let ctx = null;
 let master = null;
 let muted = false;
+let recordDest = null; // lazy MediaStreamAudioDestinationNode for capture.js
 
 function ready() {
   return ctx !== null && ctx.state === 'running';
@@ -152,6 +153,27 @@ export const audio = {
 
   get muted() {
     return muted;
+  },
+
+  // The raw AudioContext — music.js builds its Tone graph on the same context.
+  // null before ensure() has run on a user gesture.
+  getRawContext() {
+    return ctx;
+  },
+
+  // Recording tap: a lazily-created MediaStreamAudioDestinationNode with the
+  // master gain also connected into it, so SFX land in captured clips too.
+  getRecordDest() {
+    if (!ctx) return null;
+    if (!recordDest) {
+      recordDest = ctx.createMediaStreamDestination();
+      master.connect(recordDest);
+    }
+    return recordDest;
+  },
+
+  getRecordStream() {
+    return this.getRecordDest()?.stream ?? null;
   },
 
   place() {

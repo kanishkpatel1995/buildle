@@ -78,6 +78,11 @@ export function getDayNumber(date = new Date()) {
   return Math.floor((utcDayStart(date) - BUILDLE_EPOCH_UTC) / MS_PER_DAY) + 1;
 }
 
+// 0..1 progress through the CURRENT UTC day — drives the gardener's schedule.
+export function getDayFraction(date = new Date()) {
+  return (date.getTime() - utcDayStart(date)) / MS_PER_DAY;
+}
+
 export function getPrompt(date = new Date()) {
   const daysSinceUnixEpoch = Math.floor(utcDayStart(date) / MS_PER_DAY);
   return PROMPTS[daysSinceUnixEpoch % PROMPTS.length];

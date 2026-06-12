@@ -32,9 +32,8 @@ export const WORLD_HEIGHT = 32;
 // ---------------------------------------------------------------------------
 // Tunables
 
-const ISLAND_RADIUS = 33; // ground mask: hypot(x + 0.5, z + 0.5) <= 33
-const CHUNK_SIZE = 16; // columns per chunk side
-const CHUNKS_PER_SIDE = 4; // 4×4 chunk grid covers the 64×64 island
+const ISLAND_RADIUS = 33; // default ground mask: hypot(x + 0.5, z + 0.5) <= 33
+const CHUNK_SIZE = 16; // columns per chunk side; chunk grid derives from size
 
 const GRASS_HEX = '#A8B86E';
 const EARTH_HEX = '#8A6B52';
@@ -83,10 +82,6 @@ export function isGround(x, z) {
 
 const key = (x, y, z) => `${x},${y},${z}`;
 const colKey = (x, z) => `${x},${z}`;
-
-function chunkIndex(x, z) {
-  return ((z - WORLD_MIN) >> 4) * CHUNKS_PER_SIDE + ((x - WORLD_MIN) >> 4);
-}
 
 // Deterministic per-cell hash in [0, 1) — grass jitter, rock wobble, canopy accents.
 function hash2(x, z) {
@@ -323,13 +318,6 @@ const ROCK_LAYERS = [
   { r: 5.5, cx: 3, cz: -3, y0: -11.2, y1: -9.0, wobble: 0.8 },
 ];
 
-function inRockLayer(i, x, z) {
-  const L = ROCK_LAYERS[i];
-  if (!L) return false;
-  const wob = (hash2(x + i * 131, z - i * 57) - 0.5) * L.wobble;
-  return Math.hypot(x + 0.5 - L.cx, z + 0.5 - L.cz) <= L.r + wob;
-}
-
 // A few hanging rock chunks drifting just below the underside: [x, y, z, size]
 const HANGING_ROCKS = [
   [-21, -6.2, 4, 1.6],
@@ -341,17 +329,49 @@ const HANGING_ROCKS = [
 
 // ---------------------------------------------------------------------------
 
+// Every public method takes and returns GLOBAL integer coordinates; block map
+// keys, serialize()/load() payloads, and seed content stay in LOCAL island
+// coordinates (local = global - origin), so existing plaza saves load unchanged.
 export class World {
-  constructor(scene, { reducedMotion = false } = {}) {
+  constructor(scene, {
+    reducedMotion = false,
+    origin = { x: 0, z: 0 },
+    size = 64,
+    radius = ISLAND_RADIUS,
+    buildable = true,
+    seeded = true,
+  } = {}) {
     this.scene = scene;
     this.reducedMotion = reducedMotion;
+    this.origin = { x: origin.x | 0, z: origin.z | 0 };
+    this.size = size;
+    this.radius = radius;
+    this.buildable = buildable;
+    this.seeded = seeded;
+    this._min = -(size >> 1); // local bounds [-size/2 .. size/2 - 1]
+    this._max = this._min + size - 1;
+    this._chunksPerSide = Math.ceil(size / CHUNK_SIZE);
+
+    // Underside rock decor scales with the footprint so small islands don't
+    // trail plaza-sized stone. The default island reuses the exact authored
+    // constants, so its geometry stays byte-identical. Depths anchor at the
+    // skirt bottom to keep the skirt→rock silhouette seamless at any scale.
+    const rockScale = this.radius / ISLAND_RADIUS;
+    const scaleY = (y) => SKIRT_BOTTOM + (y - SKIRT_BOTTOM) * rockScale;
+    this._rockLayers = rockScale === 1 ? ROCK_LAYERS : ROCK_LAYERS.map((L) => ({
+      r: L.r * rockScale, cx: L.cx * rockScale, cz: L.cz * rockScale,
+      y0: scaleY(L.y0), y1: scaleY(L.y1), wobble: L.wobble * rockScale,
+    }));
+    this._hangingRocks = rockScale === 1 ? HANGING_ROCKS : HANGING_ROCKS.map(
+      ([x, y, z, s]) => [x * rockScale, scaleY(y), z * rockScale, s * rockScale]);
+
     this.blocks = new Map();
     this.onChange = null;
     this.protectedColumns = new Set();
     this.protectedBlocks = new Set();
 
     this._chunkKeys = Array.from(
-      { length: CHUNKS_PER_SIDE * CHUNKS_PER_SIDE },
+      { length: this._chunksPerSide * this._chunksPerSide },
       () => new Set()
     );
     this._hidden = new Set(); // cells excluded from chunk geometry while popping in
@@ -365,7 +385,7 @@ export class World {
 
     this._pickables = [];
     this._chunks = [];
-    for (let i = 0; i < CHUNKS_PER_SIDE * CHUNKS_PER_SIDE; i++) {
+    for (let i = 0; i < this._chunksPerSide * this._chunksPerSide; i++) {
       const solid = new THREE.Mesh(EMPTY_GEO, this._blockMat);
       const glow = new THREE.Mesh(EMPTY_GEO, this._glowMat);
       for (const mesh of [solid, glow]) {
@@ -406,19 +426,19 @@ export class World {
         const parts = k.split(',');
         if (parts.length !== 3) continue;
         const x = +parts[0], y = +parts[1], z = +parts[2];
-        if (!this._inBounds(x, y, z)) continue;
+        if (!this._inBoundsLocal(x, y, z)) continue;
         const entry = { c: Math.min(15, Math.max(0, v.c | 0)) };
         if (typeof v.m === 'string' && v.m) entry.m = v.m.slice(0, 140);
         if (typeof v.n === 'string' && v.n) entry.n = v.n;
         this.blocks.set(key(x, y, z), entry);
       }
     }
-    if (this.blocks.size === 0) this._seedWorld();
+    if (this.blocks.size === 0 && this.seeded) this._seedWorld();
     this._buildProtection();
     for (const k of this.blocks.keys()) {
       const i = k.indexOf(',');
       const j = k.lastIndexOf(',');
-      this._chunkKeys[chunkIndex(+k.slice(0, i), +k.slice(j + 1))].add(k);
+      this._chunkKeys[this._chunkIndex(+k.slice(0, i), +k.slice(j + 1))].add(k);
     }
     for (let ci = 0; ci < this._chunks.length; ci++) this._rebuildChunk(ci);
     this._rebuildEnvelopes();
@@ -436,23 +456,33 @@ export class World {
   }
 
   get(x, y, z) {
-    return this.blocks.get(key(x, y, z));
+    return this.blocks.get(key(x - this.origin.x, y, z - this.origin.z));
   }
 
   isSolid(x, y, z) {
-    return this.blocks.has(key(x, y, z)) || (y === -1 && isGround(x, z));
+    const lx = x - this.origin.x, lz = z - this.origin.z;
+    return this.blocks.has(key(lx, y, lz)) || (y === -1 && this._isGroundLocal(lx, lz));
+  }
+
+  // Mask test against THIS island's size/radius/origin (the legacy isGround
+  // export keeps describing the plaza only).
+  isGroundAt(x, z) {
+    return this._isGroundLocal(x - this.origin.x, z - this.origin.z);
   }
 
   canPlace(x, y, z) {
+    if (!this.buildable) return false;
+    const lx = x - this.origin.x, lz = z - this.origin.z;
     return (
-      this._inBounds(x, y, z) &&
-      !this.blocks.has(key(x, y, z)) &&
-      !this.protectedColumns.has(colKey(x, z))
+      this._inBoundsLocal(lx, y, lz) &&
+      !this.blocks.has(key(lx, y, lz)) &&
+      !this.protectedColumns.has(colKey(lx, lz))
     );
   }
 
   canRemove(x, y, z) {
-    const k = key(x, y, z);
+    if (!this.buildable) return false;
+    const k = key(x - this.origin.x, y, z - this.origin.z);
     return this.blocks.has(k) && !this.protectedBlocks.has(k);
   }
 
@@ -462,13 +492,14 @@ export class World {
     const entry = { c };
     if (typeof extra.m === 'string' && extra.m) entry.m = extra.m.slice(0, 140);
     if (typeof extra.n === 'string' && extra.n) entry.n = extra.n;
-    const k = key(x, y, z);
+    const lx = x - this.origin.x, lz = z - this.origin.z;
+    const k = key(lx, y, lz);
     this.blocks.set(k, entry);
-    this._chunkKeys[chunkIndex(x, z)].add(k);
-    this._killPopAt(x, y, z);
-    if (!this.reducedMotion) this._startPop(k, x, y, z, c, 'in');
-    this._rebuildCellChunks(x, y, z);
-    if (entry.m) this._addEnvelope(k, x, y, z);
+    this._chunkKeys[this._chunkIndex(lx, lz)].add(k);
+    this._killPopAt(lx, y, lz);
+    if (!this.reducedMotion) this._startPop(k, lx, y, lz, c, 'in');
+    this._rebuildCellChunks(lx, y, lz);
+    if (entry.m) this._addEnvelope(k, lx, y, lz);
     this.spawnBurst(this._tmpVec.set(x + 0.5, y + 0.5, z + 0.5), PALETTE[c].hex, BURST_PLACE);
     if (this.onChange) this.onChange();
     return true;
@@ -476,17 +507,48 @@ export class World {
 
   remove(x, y, z) {
     if (!this.canRemove(x, y, z)) return false;
-    const k = key(x, y, z);
+    const lx = x - this.origin.x, lz = z - this.origin.z;
+    const k = key(lx, y, lz);
     const entry = this.blocks.get(k);
     this.blocks.delete(k);
-    this._chunkKeys[chunkIndex(x, z)].delete(k);
-    this._killPopAt(x, y, z);
-    if (!this.reducedMotion) this._startPop(null, x, y, z, entry.c, 'out');
-    this._rebuildCellChunks(x, y, z);
+    this._chunkKeys[this._chunkIndex(lx, lz)].delete(k);
+    this._killPopAt(lx, y, lz);
+    if (!this.reducedMotion) this._startPop(null, lx, y, lz, entry.c, 'out');
+    this._rebuildCellChunks(lx, y, lz);
     this._removeEnvelope(k);
     this.spawnBurst(this._tmpVec.set(x + 0.5, y + 0.5, z + 0.5), PALETTE[entry.c].hex, BURST_REMOVE);
     if (this.onChange) this.onChange();
     return true;
+  }
+
+  // Bounds-checked placement that skips buildable/protection rules — the
+  // gardener bot's animated placements. Never overwrites, never fires onChange.
+  forcePlace(x, y, z, colorIndex) {
+    const lx = x - this.origin.x, lz = z - this.origin.z;
+    if (!this._inBoundsLocal(lx, y, lz)) return false;
+    const k = key(lx, y, lz);
+    if (this.blocks.has(k)) return false;
+    const c = Math.min(15, Math.max(0, colorIndex | 0));
+    this.blocks.set(k, { c });
+    this._chunkKeys[this._chunkIndex(lx, lz)].add(k);
+    this._killPopAt(lx, y, lz);
+    if (!this.reducedMotion) this._startPop(k, lx, y, lz, c, 'in');
+    this._rebuildCellChunks(lx, y, lz);
+    this.spawnBurst(this._tmpVec.set(x + 0.5, y + 0.5, z + 0.5), PALETTE[c].hex, BURST_PLACE);
+    return true;
+  }
+
+  // Bot catch-up: entries = [[gx, gy, gz, colorIndex], ...] set straight into
+  // the map (local-keyed), then ONE full rebuild. No pops/particles/onChange.
+  setBlocksBulk(entries) {
+    for (const [x, y, z, colorIndex] of entries) {
+      const lx = x - this.origin.x, lz = z - this.origin.z;
+      if (!this._inBoundsLocal(lx, y, lz)) continue;
+      const k = key(lx, y, lz);
+      this.blocks.set(k, { c: Math.min(15, Math.max(0, colorIndex | 0)) });
+      this._chunkKeys[this._chunkIndex(lx, lz)].add(k);
+    }
+    for (let ci = 0; ci < this._chunks.length; ci++) this._rebuildChunk(ci);
   }
 
   pick(raycaster, playerCenter) {
@@ -500,13 +562,15 @@ export class World {
     res.block = null;
     res.inRange = false;
     const p = hit.point;
-    // Chunk/island meshes are untransformed and pop cubes only translate and
-    // uniform-scale, so face normals stay world-axis-aligned.
+    const ox = this.origin.x, oz = this.origin.z;
+    // Chunk/island meshes are untransformed (origin is baked into their
+    // geometry) and pop cubes only translate and uniform-scale, so face
+    // normals stay world-axis-aligned. Cells below are GLOBAL.
     const n = hit.face.normal;
     const px = Math.floor(p.x + n.x * 0.5);
     const py = Math.floor(p.y + n.y * 0.5);
     const pz = Math.floor(p.z + n.z * 0.5);
-    if (this._inBounds(px, py, pz) && !this.blocks.has(key(px, py, pz))) {
+    if (this._inBoundsLocal(px - ox, py, pz - oz) && !this.blocks.has(key(px - ox, py, pz - oz))) {
       this._cellA.x = px;
       this._cellA.y = py;
       this._cellA.z = pz;
@@ -516,7 +580,7 @@ export class World {
       const rx = Math.floor(p.x - n.x * 0.5);
       const ry = Math.floor(p.y - n.y * 0.5);
       const rz = Math.floor(p.z - n.z * 0.5);
-      const rk = key(rx, ry, rz);
+      const rk = key(rx - ox, ry, rz - oz);
       if (this.blocks.has(rk)) {
         this._cellB.x = rx;
         this._cellB.y = ry;
@@ -545,13 +609,32 @@ export class World {
     this._updateParticles(dt);
   }
 
-  _inBounds(x, y, z) {
+  _inBoundsLocal(x, y, z) {
     return (
       Number.isInteger(x) && Number.isInteger(y) && Number.isInteger(z) &&
-      x >= WORLD_MIN && x <= WORLD_MAX &&
-      z >= WORLD_MIN && z <= WORLD_MAX &&
+      x >= this._min && x <= this._max &&
+      z >= this._min && z <= this._max &&
       y >= 0 && y < WORLD_HEIGHT
     );
+  }
+
+  _isGroundLocal(x, z) {
+    return (
+      x >= this._min && x <= this._max &&
+      z >= this._min && z <= this._max &&
+      Math.hypot(x + 0.5, z + 0.5) <= this.radius
+    );
+  }
+
+  _chunkIndex(x, z) {
+    return ((z - this._min) >> 4) * this._chunksPerSide + ((x - this._min) >> 4);
+  }
+
+  _inRockLayer(i, x, z) {
+    const L = this._rockLayers[i];
+    if (!L) return false;
+    const wob = (hash2(x + i * 131, z - i * 57) - 0.5) * L.wobble;
+    return Math.hypot(x + 0.5 - L.cx, z + 0.5 - L.cz) <= L.r + wob;
   }
 
   // -- seeding & protection ---------------------------------------------------
@@ -570,6 +653,7 @@ export class World {
   _buildProtection() {
     this.protectedColumns.clear();
     this.protectedBlocks.clear();
+    if (!this.seeded) return;
     for (const ck of PATH_SET) this.protectedColumns.add(ck);
     forEachPondCell((x, z) => this.protectedColumns.add(colKey(x, z)));
     for (const [tx, tz] of TREES) this.protectedColumns.add(colKey(tx, tz));
@@ -580,6 +664,7 @@ export class World {
   // -- chunk meshing ----------------------------------------------------------
 
   _rebuildChunk(ci) {
+    const ox = this.origin.x, oz = this.origin.z;
     const solid = new GeoBuilder();
     const glow = new GeoBuilder();
     for (const k of this._chunkKeys[ci]) {
@@ -591,7 +676,7 @@ export class World {
       const color = PALETTE_LINEAR[data.c];
       for (const f of FACES) {
         if (this._cullSolid(x + f.n[0], y + f.n[1], z + f.n[2])) continue;
-        builder.face(f, x, y, z, 1, 1, 1, color);
+        builder.face(f, x + ox, y, z + oz, 1, 1, 1, color);
       }
     }
     const chunk = this._chunks[ci];
@@ -599,8 +684,9 @@ export class World {
     this._setChunkGeometry(chunk.glow, glow.build());
   }
 
+  // Local coords in, like every _-prefixed spatial helper below.
   _cullSolid(x, y, z) {
-    if (y === -1) return isGround(x, z);
+    if (y === -1) return this._isGroundLocal(x, z);
     const k = key(x, y, z);
     return this.blocks.has(k) && !this._hidden.has(k);
   }
@@ -613,51 +699,54 @@ export class World {
 
   // Rebuild the touched chunk, plus the face-adjacent neighbor on a border.
   _rebuildCellChunks(x, y, z) {
-    this._rebuildChunk(chunkIndex(x, z));
-    const lx = (x - WORLD_MIN) & (CHUNK_SIZE - 1);
-    const lz = (z - WORLD_MIN) & (CHUNK_SIZE - 1);
-    if (lx === 0 && x > WORLD_MIN) this._rebuildChunk(chunkIndex(x - 1, z));
-    if (lx === CHUNK_SIZE - 1 && x < WORLD_MAX) this._rebuildChunk(chunkIndex(x + 1, z));
-    if (lz === 0 && z > WORLD_MIN) this._rebuildChunk(chunkIndex(x, z - 1));
-    if (lz === CHUNK_SIZE - 1 && z < WORLD_MAX) this._rebuildChunk(chunkIndex(x, z + 1));
+    this._rebuildChunk(this._chunkIndex(x, z));
+    const lx = (x - this._min) & (CHUNK_SIZE - 1);
+    const lz = (z - this._min) & (CHUNK_SIZE - 1);
+    if (lx === 0 && x > this._min) this._rebuildChunk(this._chunkIndex(x - 1, z));
+    if (lx === CHUNK_SIZE - 1 && x < this._max) this._rebuildChunk(this._chunkIndex(x + 1, z));
+    if (lz === 0 && z > this._min) this._rebuildChunk(this._chunkIndex(x, z - 1));
+    if (lz === CHUNK_SIZE - 1 && z < this._max) this._rebuildChunk(this._chunkIndex(x, z + 1));
   }
 
   // -- the island (static, built once) ----------------------------------------
 
   _buildIsland() {
+    // Loops run in LOCAL coords (masks, tints, jitter hashes); emitted face
+    // positions add the origin, so meshes themselves stay untransformed.
+    const ox = this.origin.x, oz = this.origin.z;
     const top = new GeoBuilder();
     const under = new GeoBuilder();
     const skirtH = -SKIRT_BOTTOM;
-    for (let x = WORLD_MIN; x <= WORLD_MAX; x++) {
-      for (let z = WORLD_MIN; z <= WORLD_MAX; z++) {
-        if (!isGround(x, z)) continue;
-        const pond = inPond(x, z);
+    for (let x = this._min; x <= this._max; x++) {
+      for (let z = this._min; z <= this._max; z++) {
+        if (!this._isGroundLocal(x, z)) continue;
+        const pond = this.seeded && inPond(x, z);
         if (pond) {
-          top.face(FACE_PY, x, -1 - POND_RECESS, z, 1, 1, 1, jitterColor(C_WATER, x, z, 0.05));
+          top.face(FACE_PY, x + ox, -1 - POND_RECESS, z + oz, 1, 1, 1, jitterColor(C_WATER, x, z, 0.05));
           // earth lip where the water meets higher ground
-          if (isGround(x + 1, z) && !inPond(x + 1, z))
-            top.face(FACE_NX, x + 1, -POND_RECESS, z, 1, POND_RECESS, 1, jitterColor(C_EARTH, x + 1, z, 0.05));
-          if (isGround(x - 1, z) && !inPond(x - 1, z))
-            top.face(FACE_PX, x - 1, -POND_RECESS, z, 1, POND_RECESS, 1, jitterColor(C_EARTH, x - 1, z, 0.05));
-          if (isGround(x, z + 1) && !inPond(x, z + 1))
-            top.face(FACE_NZ, x, -POND_RECESS, z + 1, 1, POND_RECESS, 1, jitterColor(C_EARTH, x, z + 1, 0.05));
-          if (isGround(x, z - 1) && !inPond(x, z - 1))
-            top.face(FACE_PZ, x, -POND_RECESS, z - 1, 1, POND_RECESS, 1, jitterColor(C_EARTH, x, z - 1, 0.05));
-        } else if (PATH_SET.has(colKey(x, z))) {
-          top.face(FACE_PY, x, -1, z, 1, 1, 1, jitterColor(C_PATH, x, z, 0.04));
+          if (this._isGroundLocal(x + 1, z) && !inPond(x + 1, z))
+            top.face(FACE_NX, x + 1 + ox, -POND_RECESS, z + oz, 1, POND_RECESS, 1, jitterColor(C_EARTH, x + 1, z, 0.05));
+          if (this._isGroundLocal(x - 1, z) && !inPond(x - 1, z))
+            top.face(FACE_PX, x - 1 + ox, -POND_RECESS, z + oz, 1, POND_RECESS, 1, jitterColor(C_EARTH, x - 1, z, 0.05));
+          if (this._isGroundLocal(x, z + 1) && !inPond(x, z + 1))
+            top.face(FACE_NZ, x + ox, -POND_RECESS, z + 1 + oz, 1, POND_RECESS, 1, jitterColor(C_EARTH, x, z + 1, 0.05));
+          if (this._isGroundLocal(x, z - 1) && !inPond(x, z - 1))
+            top.face(FACE_PZ, x + ox, -POND_RECESS, z - 1 + oz, 1, POND_RECESS, 1, jitterColor(C_EARTH, x, z - 1, 0.05));
+        } else if (this.seeded && PATH_SET.has(colKey(x, z))) {
+          top.face(FACE_PY, x + ox, -1, z + oz, 1, 1, 1, jitterColor(C_PATH, x, z, 0.04));
         } else {
-          top.face(FACE_PY, x, -1, z, 1, 1, 1, jitterColor(C_GRASS, x, z, GRASS_JITTER));
+          top.face(FACE_PY, x + ox, -1, z + oz, 1, 1, 1, jitterColor(C_GRASS, x, z, GRASS_JITTER));
         }
         // earth skirt around the rim
         const earth = jitterColor(C_EARTH, x, z, 0.06);
-        if (!isGround(x + 1, z)) under.face(FACE_PX, x, SKIRT_BOTTOM, z, 1, skirtH, 1, earth);
-        if (!isGround(x - 1, z)) under.face(FACE_NX, x, SKIRT_BOTTOM, z, 1, skirtH, 1, earth);
-        if (!isGround(x, z + 1)) under.face(FACE_PZ, x, SKIRT_BOTTOM, z, 1, skirtH, 1, earth);
-        if (!isGround(x, z - 1)) under.face(FACE_NZ, x, SKIRT_BOTTOM, z, 1, skirtH, 1, earth);
+        if (!this._isGroundLocal(x + 1, z)) under.face(FACE_PX, x + ox, SKIRT_BOTTOM, z + oz, 1, skirtH, 1, earth);
+        if (!this._isGroundLocal(x - 1, z)) under.face(FACE_NX, x + ox, SKIRT_BOTTOM, z + oz, 1, skirtH, 1, earth);
+        if (!this._isGroundLocal(x, z + 1)) under.face(FACE_PZ, x + ox, SKIRT_BOTTOM, z + oz, 1, skirtH, 1, earth);
+        if (!this._isGroundLocal(x, z - 1)) under.face(FACE_NZ, x + ox, SKIRT_BOTTOM, z + oz, 1, skirtH, 1, earth);
       }
     }
-    for (let i = 0; i < ROCK_LAYERS.length; i++) {
-      const L = ROCK_LAYERS[i];
+    for (let i = 0; i < this._rockLayers.length; i++) {
+      const L = this._rockLayers[i];
       const h = L.y1 - L.y0;
       const x0 = Math.floor(L.cx - L.r - 2);
       const x1 = Math.ceil(L.cx + L.r + 2);
@@ -665,18 +754,18 @@ export class World {
       const z1 = Math.ceil(L.cz + L.r + 2);
       for (let x = x0; x <= x1; x++) {
         for (let z = z0; z <= z1; z++) {
-          if (!inRockLayer(i, x, z)) continue;
+          if (!this._inRockLayer(i, x, z)) continue;
           const rock = jitterColor(C_ROCK, x + i * 37, z - i * 61, 0.07);
-          if (!inRockLayer(i, x + 1, z)) under.face(FACE_PX, x, L.y0, z, 1, h, 1, rock);
-          if (!inRockLayer(i, x - 1, z)) under.face(FACE_NX, x, L.y0, z, 1, h, 1, rock);
-          if (!inRockLayer(i, x, z + 1)) under.face(FACE_PZ, x, L.y0, z, 1, h, 1, rock);
-          if (!inRockLayer(i, x, z - 1)) under.face(FACE_NZ, x, L.y0, z, 1, h, 1, rock);
-          if (!inRockLayer(i + 1, x, z)) under.face(FACE_NY, x, L.y0, z, 1, 1, 1, rock);
+          if (!this._inRockLayer(i, x + 1, z)) under.face(FACE_PX, x + ox, L.y0, z + oz, 1, h, 1, rock);
+          if (!this._inRockLayer(i, x - 1, z)) under.face(FACE_NX, x + ox, L.y0, z + oz, 1, h, 1, rock);
+          if (!this._inRockLayer(i, x, z + 1)) under.face(FACE_PZ, x + ox, L.y0, z + oz, 1, h, 1, rock);
+          if (!this._inRockLayer(i, x, z - 1)) under.face(FACE_NZ, x + ox, L.y0, z + oz, 1, h, 1, rock);
+          if (!this._inRockLayer(i + 1, x, z)) under.face(FACE_NY, x + ox, L.y0, z + oz, 1, 1, 1, rock);
         }
       }
     }
-    for (const [x, y, z, s] of HANGING_ROCKS) {
-      under.box(x - s / 2, y - s / 2, z - s / 2, s, s, s,
+    for (const [x, y, z, s] of this._hangingRocks) {
+      under.box(x + ox - s / 2, y - s / 2, z + oz - s / 2, s, s, s,
         jitterColor(C_ROCK, Math.round(x), Math.round(z), 0.08));
     }
     this._islandTop = new THREE.Mesh(top.build(), this._blockMat);
@@ -718,7 +807,7 @@ export class World {
     } else {
       mat.emissive.set(0x000000);
     }
-    mesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+    mesh.position.set(x + this.origin.x + 0.5, y + 0.5, z + this.origin.z + 0.5);
     mesh.scale.setScalar(mode === 'in' ? 0.6 : 1);
     mesh.visible = true;
     if (mode === 'in') {
@@ -877,7 +966,7 @@ export class World {
     if (this._envelopes.has(k)) return;
     const sprite = new THREE.Sprite(this._envelopeMat);
     sprite.scale.set(ENVELOPE_SCALE, ENVELOPE_SCALE, 1);
-    sprite.position.set(x + 0.5, y + ENVELOPE_RISE, z + 0.5);
+    sprite.position.set(x + this.origin.x + 0.5, y + ENVELOPE_RISE, z + this.origin.z + 0.5);
     sprite.userData.baseY = y + ENVELOPE_RISE;
     sprite.userData.phase = hash2(x, z) * Math.PI * 2;
     this.scene.add(sprite);

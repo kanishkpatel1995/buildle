@@ -6,6 +6,10 @@ import { World, PALETTE, GLOW_INDEX, WORLD_MIN, WORLD_MAX, WORLD_HEIGHT, PLACE_R
 import { Player } from './player.js';
 import { ui } from './ui.js';
 import { audio } from './audio.js';
+import { music } from './music.js';
+import { Views } from './views.js';
+import { capture } from './capture.js';
+import { Gardener } from './bot.js';
 import { getToday } from './prompts.js';
 import { storageAvailable, loadWorld, saveWorld, loadPlayer, savePlayer } from './storage.js';
 
@@ -48,6 +52,16 @@ const LONG_PRESS_MS = 450;
 const JOYSTICK_RADIUS = 56;
 const JOYSTICK_DEADZONE = 0.12;
 const PINCH_ZOOM_SCALE = 3;                   // px of pinch → player.zoom delta
+
+// The gardener's island — a smaller floating isle to the north-east where the
+// bot builds something new every day. Stand cell local (0, 12) per the mask.
+const GARDEN_ORIGIN = { x: 70, z: -70 };
+const GARDEN_SIZE = 26, GARDEN_RADIUS = 13;
+const GARDEN_STAND = { x: 70.5, z: -57.5 };
+const GARDEN_CENTER = new THREE.Vector3(70.5, 2, -69.5);
+const PLAZA_STAND = { x: 1, z: 16 };
+const TRAVEL_GLIDE_MS = 1300;                 // camera leads, player teleports behind it
+const TRAVEL_SETTLE_MS = 700;
 
 const DEFAULT_COLOR = 2;                      // terracotta — warm first swatch
 const SAVE_DEBOUNCE_MS = 400;
@@ -238,8 +252,8 @@ const SILHOUETTE_PARTS = [
 const silhouetteGeo = mergedBoxes(SILHOUETTE_PARTS);
 const fogColor3 = new THREE.Color(FOG_COLOR);
 for (const { pos, scale, mix, rot } of [
+  // (the third silhouette became the gardener's real island at (70, -70))
   { pos: [-95, 4, -88], scale: 1.6, mix: 0.5, rot: 0.7 },
-  { pos: [105, -4, -64], scale: 1.15, mix: 0.58, rot: 2.3 },
   { pos: [34, 9, -132], scale: 2.0, mix: 0.66, rot: 4.1 },
 ]) {
   const island = new THREE.Mesh(silhouetteGeo, new THREE.MeshBasicMaterial({
@@ -358,12 +372,42 @@ function updateEnvironment(dt, t) {
 const world = new World(scene, { reducedMotion });
 world.load(loadWorld());
 
+// The gardener's island: unseeded, unbuildable, watched over by the bot.
+const botWorld = new World(scene, {
+  reducedMotion,
+  origin: GARDEN_ORIGIN,
+  size: GARDEN_SIZE,
+  radius: GARDEN_RADIUS,
+  buildable: false,
+  seeded: false,
+});
+botWorld.load(null);
+const gardener = new Gardener(scene, botWorld, { reducedMotion });
+gardener.onPlace = (y, c) => music.notePlaced(y, c, true);
+
+let activeWorld = world;
+let traveling = false;
+
 const player = new Player(scene, world, {
   name: profile.name || defaultName,
   bodyColorIndex: profile.bodyColor,
   reducedMotion,
 });
 player.onFootstep = (alt) => audio.step(alt);
+
+const views = new Views(player, { reducedMotion });
+
+// Audio + the song of the day both wake on the first user gesture.
+function ensureAudioAndMusic() {
+  audio.ensure();
+  const ctx = audio.getRawContext();
+  if (ctx && !music.started) {
+    music.start(ctx);
+    const dest = audio.getRecordDest();
+    if (dest) music.connectRecorder(dest);
+    music.setMuted(profile.muted);
+  }
+}
 
 // ── input ───────────────────────────────────────────────────────────────────
 
@@ -405,19 +449,24 @@ scene.add(ghost);
 function pickAt(clientX, clientY) {
   _ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
   _raycaster.setFromCamera(_ndc, player.camera);
-  return world.pick(_raycaster, player.getCenter());
+  return activeWorld.pick(_raycaster, player.getCenter());
 }
 
 const inBounds = (x, y, z) =>
   x >= WORLD_MIN && x <= WORLD_MAX && z >= WORLD_MIN && z <= WORLD_MAX && y >= 0 && y < WORLD_HEIGHT;
 
 async function attemptPlace(clientX, clientY) {
+  if (views.mode !== 'follow' || traveling) return;
   const hit = pickAt(clientX, clientY);
   if (!hit) return;
   if (hit.block && hit.block.m) {
     // a block with a note opens it instead of building
     audio.open();
     ui.showNote({ text: hit.block.m, author: hit.block.n || 'a wanderer' });
+    return;
+  }
+  if (!activeWorld.buildable) {
+    ui.toast("the gardener's island — look, don't touch");
     return;
   }
   if (!hit.placeCell) return;
@@ -442,6 +491,8 @@ async function attemptPlace(clientX, clientY) {
     }
     if (world.place(x, y, z, GLOW_INDEX, { m: text.trim().slice(0, 140), n: profile.name })) {
       audio.place();
+      music.duck();
+      music.notePlaced(y, GLOW_INDEX);
       messageUsed = true;
       ui.setMessageUsed(true);
       mode = 'color';
@@ -450,17 +501,27 @@ async function attemptPlace(clientX, clientY) {
     }
   } else if (world.place(x, y, z, selectedColor)) {
     audio.place();
+    music.duck();
+    music.notePlaced(y, selectedColor);
     bumpStreak();
   }
 }
 
 function attemptRemove(clientX, clientY) {
+  if (views.mode !== 'follow' || traveling) return;
   const hit = pickAt(clientX, clientY);
   if (!hit || !hit.removeCell) return;
+  if (!activeWorld.buildable) {
+    ui.toast("the gardener's island — look, don't touch");
+    return;
+  }
   if (!hit.inRange) { ui.toast('too far away — walk closer'); return; }
   const { x, y, z } = hit.removeCell;
   if (!world.canRemove(x, y, z)) { ui.toast("that one's part of the island"); return; }
-  if (world.remove(x, y, z)) audio.remove();
+  if (world.remove(x, y, z)) {
+    audio.remove();
+    music.duck();
+  }
 }
 
 function selectColor(i) {
@@ -488,7 +549,7 @@ function touchDown(e) {
     role: 'look', x0: e.clientX, y0: e.clientY, lx: e.clientX, ly: e.clientY,
     t0: performance.now(), travel: 0, consumed: false, timer: 0, shown: false,
   };
-  if (joystickId === -1 && e.clientX < viewW / 2) {
+  if (joystickId === -1 && e.clientX < viewW / 2 && views.mode === 'follow' && !traveling) {
     // left half claims the joystick role, but taps and long-presses still
     // work there — the stick only takes over once the finger really drags
     p.role = 'stick';
@@ -534,7 +595,10 @@ function onPointerMove(e) {
     const dx = e.clientX - mouse.lx, dy = e.clientY - mouse.ly;
     mouse.lx = e.clientX; mouse.ly = e.clientY;
     if (!mouse.dragging && Math.hypot(e.clientX - mouse.x0, e.clientY - mouse.y0) > DRAG_PX) mouse.dragging = true;
-    if (mouse.dragging && mouse.button === 0) player.orbit(dx, dy);
+    if (mouse.dragging && mouse.button === 0) {
+      if (views.mode !== 'follow') views.orbit(dx, dy);
+      else player.orbit(dx, dy);
+    }
     return;
   }
   const p = pointers.get(e.pointerId);
@@ -561,8 +625,13 @@ function onPointerMove(e) {
   const looks = collectLooks();
   if (looks.length >= 2) {
     const d = Math.hypot(looks[0].lx - looks[1].lx, looks[0].ly - looks[1].ly);
-    if (pinchDist > 0) player.zoom((pinchDist - d) * PINCH_ZOOM_SCALE);
+    if (pinchDist > 0) {
+      if (views.mode !== 'follow') views.zoom((pinchDist - d) * PINCH_ZOOM_SCALE);
+      else player.zoom((pinchDist - d) * PINCH_ZOOM_SCALE);
+    }
     pinchDist = d;
+  } else if (views.mode !== 'follow') {
+    views.orbit(dx, dy);
   } else {
     player.orbit(dx, dy);
   }
@@ -610,27 +679,35 @@ canvas.addEventListener('pointerup', onPointerUp);
 canvas.addEventListener('pointercancel', onPointerUp);
 canvas.addEventListener('pointerleave', () => { pointerInside = false; });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-canvas.addEventListener('wheel', (e) => { e.preventDefault(); player.zoom(e.deltaY); }, { passive: false });
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  if (views.mode !== 'follow') views.zoom(e.deltaY);
+  else player.zoom(e.deltaY);
+}, { passive: false });
 
 window.addEventListener('keydown', (e) => {
   if (modalOpen) return;
   const t = e.target;
   if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || (t && t.isContentEditable)) return;
   const key = e.key.toLowerCase();
+  if (key === 'escape') { setViewMode('follow'); return; }
   if (MOVE_KEYS.has(key)) {
     keys.add(key);
     if (key.startsWith('arrow')) e.preventDefault();
     return;
   }
   if (key >= '1' && key <= '9') { selectColor(Number(key) - 1); return; }
-  if (key === 'm') selectMessageMode();
+  if (key === 'm') { selectMessageMode(); return; }
+  if (key === 'p') { setViewMode(views.mode === 'photo' ? 'follow' : 'photo'); return; }
+  if (key === 'o') setViewMode(views.mode === 'sky' ? 'follow' : 'sky');
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 window.addEventListener('blur', () => keys.clear());
 
 function updateGhost(t) {
   let visible = false;
-  if (lastPointerType !== 'touch' && pointerInside && !(mouse.down && mouse.dragging) && !contextLost) {
+  if (lastPointerType !== 'touch' && pointerInside && !(mouse.down && mouse.dragging) && !contextLost &&
+      views.mode === 'follow' && !traveling && activeWorld.buildable) {
     const hit = pickAt(mouse.x, mouse.y);
     if (hit && hit.placeCell && hit.inRange && !(hit.block && hit.block.m)) {
       const { x, y, z } = hit.placeCell;
@@ -711,6 +788,113 @@ async function shareFlow() {
   }
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function setViewMode(modeName) {
+  if (capture.busy || traveling) return;
+  if (modeName === views.mode) return;
+  views.setMode(modeName);
+  ui.setPhotoMode(modeName === 'photo');
+  ui.setHudHidden(modeName === 'photo');
+  if (modeName !== 'follow') {
+    keys.clear();
+    player.setMoveInput(0, 0);
+  }
+  audio.ui();
+}
+
+function openViewsMenu() {
+  if (capture.busy || traveling) return;
+  const items = [];
+  if (views.mode !== 'photo') items.push({ label: 'photo mode', onPick: () => setViewMode('photo') });
+  if (views.mode !== 'sky') items.push({ label: 'sky view', onPick: () => setViewMode('sky') });
+  if (views.mode !== 'follow') items.push({ label: 'back to walking', onPick: () => setViewMode('follow') });
+  ui.openViewsMenu(items);
+}
+
+// Plaza ⇄ the gardener's island: the camera leads the way, the player follows.
+async function travel() {
+  if (traveling || capture.busy || modalOpen) return;
+  traveling = true;
+  setViewModeSafe('follow');
+  const toGarden = activeWorld === world;
+  const dest = toGarden ? GARDEN_STAND : PLAZA_STAND;
+  const destWorld = toGarden ? botWorld : world;
+  audio.ui();
+  views.setMode('photo', { center: new THREE.Vector3(dest.x, 2.5, dest.z) });
+  await sleep(TRAVEL_GLIDE_MS);
+  player.position.set(dest.x, 0, dest.z);
+  player._physY = 0;
+  player._velY = 0;
+  player.setWorld(destWorld);
+  activeWorld = destWorld;
+  await sleep(TRAVEL_SETTLE_MS);
+  views.setMode('follow');
+  traveling = false;
+  ui.toast(toGarden ? "the gardener's island — look, don't touch" : 'back to the plaza');
+}
+
+// setViewMode without the traveling guard — travel() manages its own camera.
+function setViewModeSafe(modeName) {
+  ui.setPhotoMode(false);
+  ui.setHudHidden(false);
+  if (views.mode !== 'follow' && modeName === 'follow') views.setMode('follow');
+}
+
+function openShareMenu() {
+  if (capture.busy || traveling) return;
+  const items = [{ label: 'postcard', onPick: () => { audio.ui(); shareFlow(); } }];
+  if (capture.isSupported()) {
+    items.push({ label: 'clip · 8s', onPick: () => { audio.ui(); clipFlow(); } });
+  }
+  ui.openShareMenu(items);
+}
+
+async function clipFlow() {
+  if (capture.busy || traveling) return;
+  refreshDay();
+  ensureAudioAndMusic();
+  const onGarden = activeWorld === botWorld;
+  const result = await capture.recordClip({
+    renderer, scene, player, views, ui, audio,
+    meta: {
+      day: TODAY.day,
+      prompt: TODAY.prompt,
+      name: profile.name,
+      streak: displayedStreak(),
+      center: onGarden ? GARDEN_CENTER : undefined,
+    },
+  });
+  ui.setPhotoMode(false);
+  ui.setHudHidden(false);
+  if (!result) {
+    ui.toast("couldn't film just now — try the postcard");
+    return;
+  }
+  const shareText = `buildle day ${TODAY.day} · "${TODAY.prompt}"` +
+    (displayedStreak() > 0 ? ` · 🔥${displayedStreak()}` : '') + ' · buildle.vercel.app';
+  const file = new File([result.blob], result.filename, { type: result.mimeType });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], text: shareText });
+    } catch {
+      // user closed the share sheet — nothing to do
+    }
+  } else {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(result.blob);
+    link.download = result.filename;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    try {
+      await navigator.clipboard.writeText(shareText);
+      ui.toast('saved your clip');
+    } catch {
+      ui.toast('saved your clip');
+    }
+  }
+}
+
 async function helpFlow() {
   const fallback = profile.name || defaultName;
   modalOpen = true;
@@ -722,24 +906,28 @@ async function helpFlow() {
   profile.helpSeen = true;
   savePlayer(profile);
   player.setName(profile.name);
-  audio.ensure();   // the overlay dismissal is a user gesture
+  ensureAudioAndMusic();   // the overlay dismissal is a user gesture
 }
 
 audio.setMuted(profile.muted);
-window.addEventListener('pointerdown', () => audio.ensure(), { once: true });
+window.addEventListener('pointerdown', () => ensureAudioAndMusic(), { once: true });
 
 ui.init({
   onSelectColor: selectColor,
   onSelectMessage: selectMessageMode,
-  onShare: () => { audio.ui(); shareFlow(); },
+  onShare: openShareMenu,
   onToggleSound: () => {
     audio.setMuted(!audio.muted);
+    music.setMuted(audio.muted);
     profile.muted = audio.muted;
     savePlayer(profile);
     audio.ui();
     return audio.muted;
   },
   onHelp: () => { audio.ui(); helpFlow(); },
+  onViews: openViewsMenu,
+  onCompass: travel,
+  onExitView: () => setViewMode('follow'),
 });
 ui.setPrompt(TODAY.prompt, TODAY.day);
 ui.setStreak(displayedStreak());
@@ -750,8 +938,9 @@ if (!profile.helpSeen || !storageAvailable) helpFlow();
 // ── loop ────────────────────────────────────────────────────────────────────
 
 function onResize() {
+  if (capture.busy) return;   // capture owns the renderer size; it re-fits afterwards
   const w = window.innerWidth, h = window.innerHeight;
-  if (!w || !h) return;   // backgrounded/headless tabs can report 0 — keep the last sane size
+  if (w < 2 || h < 2) return;   // hidden/backgrounded tabs can report 0–1px — keep the last sane size
   viewW = w;
   renderer.setSize(w, h);
   player.camera.aspect = w / h;
@@ -767,6 +956,9 @@ window.addEventListener('resize', onResize);
 window.addEventListener('orientationchange', () => {
   onResize();
   setTimeout(onResize, 300);   // some mobile browsers settle dimensions late
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) onResize();   // a hidden-tab boot may have seen 1px dims
 });
 onResize();
 
@@ -796,12 +988,19 @@ function tick() {
   dayCheckT += dt;
   if (dayCheckT > 5) { dayCheckT = 0; refreshDay(); }
   if (joystickId === -1) {
-    const kx = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
-    const kz = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0);
-    player.setMoveInput(kx, kz);
+    if (views.mode === 'follow' && !traveling) {
+      const kx = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
+      const kz = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0);
+      player.setMoveInput(kx, kz);
+    } else {
+      player.setMoveInput(0, 0);
+    }
   }
   world.update(dt, t);
+  botWorld.update(dt, t);
+  gardener.update(dt, t);
   player.update(dt, t);
+  views.update(dt, t);
   updateEnvironment(dt, t);
   updateGhost(t);
   if (!contextLost) renderer.render(scene, player.camera);

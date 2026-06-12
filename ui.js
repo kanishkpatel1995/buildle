@@ -33,8 +33,10 @@ const $ = (id) => document.getElementById(id);
 let promptTextEl, dayLineEl, paletteEl, soundBtn;
 let joyEl, knobEl, toastEl, celebrateEl;
 let overlayHelp, overlayNote, overlayComposer, overlayCtxlost;
+let shareMenuEl, viewsMenuEl, photoExitEl, filmingEl;
 let swatchEls = [];
 let messageSlotEl = null;
+let openMenuCleanup = null;
 
 let currentDay = 0;
 let currentStreak = 0;
@@ -80,6 +82,44 @@ function autoFocus(el) {
 
 function syncSoundIcon() {
   soundBtn.classList.toggle('muted', !!audio.muted);
+}
+
+// One mini-menu open at a time; closes on outside pointerdown or Escape.
+function openMenu(menuEl, items) {
+  closeMenus();
+  menuEl.replaceChildren(...items.map(({ label, onPick }) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      closeMenus();
+      onPick();
+    });
+    return b;
+  }));
+  show(menuEl);
+  const onDown = (e) => {
+    if (!menuEl.contains(e.target)) closeMenus();
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') closeMenus();
+  };
+  openMenuCleanup = () => {
+    hide(menuEl);
+    window.removeEventListener('pointerdown', onDown, true);
+    window.removeEventListener('keydown', onKey);
+    openMenuCleanup = null;
+  };
+  // capture phase + deferred so the opening tap itself can't instantly close it
+  requestAnimationFrame(() => {
+    if (!openMenuCleanup) return;
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+  });
+}
+
+function closeMenus() {
+  if (openMenuCleanup) openMenuCleanup();
 }
 
 // ── Share-card drawing helpers ──────────────────────────────────────────
@@ -167,7 +207,7 @@ function drawCardOverlay(ctx, { day, prompt, name, streak }) {
 // ── Public API ──────────────────────────────────────────────────────────
 
 export const ui = {
-  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp }) {
+  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView }) {
     promptTextEl = $('prompt-text');
     dayLineEl = $('day-line');
     paletteEl = $('palette');
@@ -179,6 +219,10 @@ export const ui = {
     overlayNote = $('overlay-note');
     overlayComposer = $('overlay-composer');
     overlayCtxlost = $('overlay-ctxlost');
+    shareMenuEl = $('share-menu');
+    viewsMenuEl = $('views-menu');
+    photoExitEl = $('photo-exit');
+    filmingEl = $('filming');
 
     celebrateEl = document.createElement('div');
     celebrateEl.id = 'celebrate';
@@ -220,6 +264,9 @@ export const ui = {
     syncSoundIcon();
     $('btn-help').addEventListener('click', onHelp);
     $('ctxlost-reload').addEventListener('click', () => location.reload());
+    if (onViews) $('btn-views').addEventListener('click', onViews);
+    if (onCompass) $('btn-compass').addEventListener('click', onCompass);
+    if (onExitView) photoExitEl.addEventListener('click', onExitView);
 
     // The mobile palette scrolls; a right-edge fade signals the clipped run
     // and lifts once the user reaches the end.
@@ -365,6 +412,34 @@ export const ui = {
 
   showContextLost() {
     show(overlayCtxlost);
+  },
+
+  setHudHidden(b) {
+    document.body.classList.toggle('hud-hidden', !!b);
+  },
+
+  setPhotoMode(b) {
+    document.body.classList.toggle('photo-mode', !!b);
+    photoExitEl.classList.toggle('hidden', !b);
+  },
+
+  setFilming(b) {
+    closeMenus();
+    document.body.classList.toggle('filming', !!b);
+    document.body.classList.toggle('hud-hidden', !!b || document.body.classList.contains('photo-mode'));
+    filmingEl.classList.toggle('hidden', !b);
+  },
+
+  openShareMenu(items) {
+    openMenu(shareMenuEl, items);
+  },
+
+  openViewsMenu(items) {
+    openMenu(viewsMenuEl, items);
+  },
+
+  closeMenus() {
+    closeMenus();
   },
 
   joystickShow(px, py) {
