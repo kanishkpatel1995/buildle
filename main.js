@@ -424,11 +424,14 @@ let traveling = false;
 // nothing here executes and travel stays exactly as shipped.
 let testIsle = null;
 (async () => {
-  let flagged = false;
-  try { flagged = localStorage.getItem('buildle_testisle') === '1'; } catch { /* storage may be walled off */ }
-  if (!flagged) return;
+  let flagId = null;
+  try {
+    const v = localStorage.getItem('buildle_testisle');
+    if (v) flagId = v === '1' ? 'test-isle' : v;   // '1' = legacy; any other value names an island id
+  } catch { /* storage may be walled off */ }
+  if (!flagId) return;
   const { loadShowcase, bakeImpostor } = await import('./islands.js');
-  const isle = await loadShowcase('test-isle', scene, { reducedMotion });
+  const isle = await loadShowcase(flagId, scene, { reducedMotion });
   // bake once to exercise the pipeline end to end; the live island is already
   // in the scene, so keeping the billboard would double-draw — release it
   const impostor = bakeImpostor(renderer, scene, isle);

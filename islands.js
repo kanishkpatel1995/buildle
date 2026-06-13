@@ -46,8 +46,11 @@ export const ISLANDS = [
   { id: 'plaza',     name: 'the plaza',            epithet: 'one prompt, one world',            origin: { x: 0, z: 0 },     radius: 33, kind: 'plaza' },
   { id: 'gardeners', name: "the gardener's isle",  epithet: 'something new grows every day',    origin: { x: 70, z: -70 },  radius: 13, kind: 'gardener' },
   { id: 'test-isle', name: 'the proving ground',   epithet: 'where new worlds are rehearsed',   origin: { x: -110, z: 60 }, radius: 17, kind: 'showcase', dev: true },
-  // W2 adds: ember-canyon (W, origin {x:-150, z:-30}, r 33), lowtide (SE, {x:90, z:110}, r 27),
-  // wicklight (S, {x:-20, z:150}, r 25), orchard (NW, {x:-120, z:-120}, r 25), astronomers (N, {x:40, z:-170}, r 21)
+  { id: 'ember-canyon', name: 'ember canyon',           epithet: 'the river that leaps into the sky',     origin: { x: -150, z: -30 },  radius: 33, kind: 'showcase' },
+  { id: 'lowtide',      name: 'lowtide',                epithet: 'where the tide forgot to return',       origin: { x: 90, z: 110 },    radius: 27, kind: 'showcase' },
+  { id: 'wicklight',    name: 'wicklight harbor',       epithet: 'every boat is remembered',              origin: { x: -20, z: 150 },   radius: 25, kind: 'showcase' },
+  { id: 'orchard',      name: 'the hanging orchard',    epithet: 'it has always been harvest evening',    origin: { x: -120, z: -120 }, radius: 25, kind: 'showcase' },
+  { id: 'astronomers',  name: "the astronomer's reach", epithet: 'watching for a night that never comes', origin: { x: 40, z: -170 },   radius: 21, kind: 'showcase' },
 ];
 
 export function getIsland(id) {
