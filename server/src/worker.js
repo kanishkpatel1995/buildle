@@ -35,6 +35,21 @@ const DELTA_LIMIT = 500;
 const HELLO_PER_HOUR = 30;
 const FALLBACK_NAME = 'wanderer';
 
+// --- live wanderers (presence) ---
+// Room allowlist mirrors the island ids in islands.js (ISLANDS) so an unknown
+// ?island= can never spin up a stray room. Kept inline (the Worker has no
+// import of the client registry) — keep in step with islands.js.
+const PRESENCE_ISLANDS = new Set([
+  'plaza', 'gardeners', 'ember-canyon', 'lowtide', 'wicklight',
+  'orchard', 'astronomers', 'foundry', 'test-isle',
+]);
+const PRESENCE_TICK_MS = 1000;   // 1Hz batched roster broadcast
+const PRESENCE_SWEEP_MS = 60000; // stale-socket sweep cadence
+const PRESENCE_STALE_MS = 90000; // drop sockets silent longer than this
+const PRESENCE_AV_CAP = 24;      // most-recently-updated avatars carried in `av`
+const PRESENCE_NAME_MAX = 16;    // matches NAME_MAX for the shared world
+const PRESENCE_BODY_MAX = 63;    // palette colour index ceiling (generous)
+
 // Plaza bounds (LOCAL coords): x,z in [-32,31], y in [0,31].
 const MIN_XZ = -32, MAX_XZ = 31, MIN_Y = 0, MAX_Y = 31;
 
@@ -304,6 +319,15 @@ export default {
     }
     if (url.pathname === '/api/models' && request.method === 'GET') {
       return json({ models: BUILD_MODELS });
+    }
+    if (url.pathname === '/api/presence') {
+      const island = url.searchParams.get('island') || '';
+      if (!PRESENCE_ISLANDS.has(island)) return json({ error: 'unknown island' }, 400);
+      if (request.headers.get('Upgrade') !== 'websocket') {
+        return new Response('expected websocket', { status: 426 });
+      }
+      const room = env.PRESENCE.get(env.PRESENCE.idFromName('presence:' + island));
+      return room.fetch(request);
     }
     if (url.pathname === '/api/hello' && request.method === 'POST') {
       const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -643,5 +667,206 @@ export class IslandDO {
     const rows = this.sql.exec('SELECT blob FROM archive WHERE day = ?', day).toArray();
     if (!rows.length) return json({ error: 'not found' }, 404);
     return json({ day, blocks: JSON.parse(rows[0].blob) });
+  }
+}
+
+// PresenceDO — one ephemeral room per island. Pure relay: it holds the latest
+// position of every connected socket in memory and fans out a single batched
+// roster at 1Hz. Nothing is persisted (no SQLite); a tab closing forgets you.
+// Uses the WebSocket Hibernation API so an idle room costs nothing.
+export class PresenceDO {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+    // Per-connection live state, keyed by short connection id. Rebuilt lazily
+    // from serialized attachments after a hibernation wake (a busy room — one
+    // with the 1Hz alarm pending — never hibernates).
+    this.peers = new Map();
+    this.seq = 0;
+    // Idle keepalives (ping/pong) are answered without waking the DO.
+    try {
+      ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+    } catch {
+      /* older runtimes / repeated set — non-fatal */
+    }
+  }
+
+  // Allocate a short, room-unique connection id. Survives hibernation via the
+  // counter being re-seeded from existing attachments in rebuild().
+  nextId() {
+    this.seq = (this.seq + 1) & 0xffffff;
+    return this.seq.toString(36) + Math.floor(Math.random() * 1296).toString(36).padStart(2, '0');
+  }
+
+  // After a hibernation wake the in-memory map is empty; rebuild skeleton peer
+  // records from each socket's serialized attachment so the roster is whole.
+  rebuild() {
+    const sockets = this.ctx.getWebSockets();
+    for (const ws of sockets) {
+      let att = null;
+      try { att = ws.deserializeAttachment(); } catch { att = null; }
+      const id = att && typeof att.id === 'string' ? att.id : null;
+      if (!id) continue;
+      if (!this.peers.has(id)) {
+        this.peers.set(id, {
+          ws, id,
+          name: typeof att.name === 'string' ? att.name : FALLBACK_NAME,
+          body: Number.isInteger(att.body) ? att.body : 0,
+          p: [0, 0, 0], y: 0, a: 0,
+          updated: Date.now(),
+        });
+      } else {
+        this.peers.get(id).ws = ws;
+      }
+    }
+  }
+
+  // The room only schedules an alarm while occupied; the alarm self-perpetuates
+  // (1Hz roster) and stops scheduling once empty.
+  async ensureAlarm() {
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + PRESENCE_TICK_MS);
+    }
+  }
+
+  async fetch(request) {
+    if (request.headers.get('Upgrade') !== 'websocket') {
+      return new Response('expected websocket', { status: 426 });
+    }
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    const id = this.nextId();
+    // Hibernation API: the DO adopts the socket; no ws.accept().
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({ id, name: FALLBACK_NAME, body: 0 });
+    this.peers.set(id, {
+      ws: server, id, name: FALLBACK_NAME, body: 0,
+      p: [0, 0, 0], y: 0, a: 0, updated: Date.now(),
+    });
+    await this.ensureAlarm();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // Resolve the peer record for a socket, healing the map after a wake.
+  peerFor(ws) {
+    for (const peer of this.peers.values()) {
+      if (peer.ws === ws) return peer;
+    }
+    let att = null;
+    try { att = ws.deserializeAttachment(); } catch { att = null; }
+    const id = att && typeof att.id === 'string' ? att.id : null;
+    if (!id) return null;
+    const peer = {
+      ws, id,
+      name: typeof att.name === 'string' ? att.name : FALLBACK_NAME,
+      body: Number.isInteger(att.body) ? att.body : 0,
+      p: [0, 0, 0], y: 0, a: 0, updated: Date.now(),
+    };
+    this.peers.set(id, peer);
+    return peer;
+  }
+
+  async webSocketMessage(ws, raw) {
+    // Defensive throughout: a malformed frame is ignored, never thrown.
+    if (typeof raw !== 'string') return;
+    let msg = null;
+    try { msg = JSON.parse(raw); } catch { return; }
+    if (!msg || typeof msg !== 'object') return;
+    const peer = this.peerFor(ws);
+    if (!peer) return;
+
+    if (msg.t === 'hello') {
+      peer.name = cleanName(msg.name);
+      peer.body = Number.isInteger(msg.body) && msg.body >= 0 && msg.body <= PRESENCE_BODY_MAX
+        ? msg.body : 0;
+      peer.updated = Date.now();
+      try { ws.serializeAttachment({ id: peer.id, name: peer.name, body: peer.body }); } catch { /* ignore */ }
+      await this.ensureAlarm();
+      return;
+    }
+    if (msg.t === 'state') {
+      const p = msg.p;
+      if (Array.isArray(p) && p.length === 3 &&
+          Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2])) {
+        peer.p = [p[0], p[1], p[2]];
+      }
+      if (Number.isFinite(msg.y)) peer.y = msg.y;
+      const a = msg.a;
+      peer.a = a === 1 || a === 2 ? a : 0;
+      peer.updated = Date.now();
+      await this.ensureAlarm();
+    }
+  }
+
+  // Drop a peer and tell the room promptly so others fade it out.
+  dropSocket(ws) {
+    let goneId = null;
+    for (const [id, peer] of this.peers) {
+      if (peer.ws === ws) { goneId = id; this.peers.delete(id); break; }
+    }
+    if (!goneId) {
+      let att = null;
+      try { att = ws.deserializeAttachment(); } catch { att = null; }
+      if (att && typeof att.id === 'string') {
+        goneId = att.id;
+        this.peers.delete(goneId);
+      }
+    }
+    try { ws.close(); } catch { /* already closed */ }
+    if (goneId) this.broadcast(JSON.stringify({ t: 'leave', id: goneId }));
+  }
+
+  webSocketClose(ws) {
+    this.dropSocket(ws);
+  }
+
+  webSocketError(ws) {
+    this.dropSocket(ws);
+  }
+
+  // Send a string frame to every live socket; prune any that are no longer open.
+  broadcast(payload) {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(payload);
+      } catch {
+        /* dead socket — the close handler (or the sweep) reaps its peer */
+      }
+    }
+  }
+
+  async alarm() {
+    // A wake may find an empty in-memory map (post-hibernation) — rebuild it.
+    if (this.peers.size === 0) this.rebuild();
+
+    const now = Date.now();
+    // Stale sweep: drop sockets silent past the threshold (each emits a leave).
+    if (now - (this._lastSweep || 0) >= PRESENCE_SWEEP_MS) {
+      this._lastSweep = now;
+      for (const peer of [...this.peers.values()]) {
+        if (now - peer.updated > PRESENCE_STALE_MS) this.dropSocket(peer.ws);
+      }
+    }
+
+    const sockets = this.ctx.getWebSockets();
+    if (sockets.length === 0) {
+      this.peers.clear();
+      return; // empty room: stop scheduling
+    }
+
+    // Build the roster: total count is everyone; `av` carries the most-recently
+    // updated, capped, so a packed room stays cheap to send and parse. Closed
+    // sockets are reaped by the close/error handlers and the stale sweep, so the
+    // map is the source of truth here.
+    const peers = [...this.peers.values()];
+    const n = peers.length;
+    peers.sort((a, b) => b.updated - a.updated);
+    const av = peers.slice(0, PRESENCE_AV_CAP).map((peer) => ({
+      id: peer.id, name: peer.name, body: peer.body, p: peer.p, y: peer.y, a: peer.a,
+    }));
+    this.broadcast(JSON.stringify({ t: 'world', n, av }));
+
+    await this.ctx.storage.setAlarm(now + PRESENCE_TICK_MS);
   }
 }

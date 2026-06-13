@@ -14,6 +14,7 @@ import { Gardener } from './bot.js';
 import { ISLANDS, getIsland, loadShowcase, bakeImpostor } from './islands.js';
 import { createVoyage } from './voyage.js';
 import { createFoundry } from './foundry.js';
+import { createPresence } from './presence.js';
 import { createSync } from './sync.js';
 import { getToday } from './prompts.js';
 import { storageAvailable, loadWorld, saveWorld, loadPlayer, savePlayer } from './storage.js';
@@ -427,6 +428,24 @@ gardener.onPlace = (y, c) => music.notePlaced(y, c, true);
 // via the voyage like any showcase island.
 const foundry = createFoundry({ scene, reducedMotion });
 
+// Live wanderers — gated: if the presence room is unreachable the game stays
+// solo. getState reports the player's ground pose; a = 1 while moving.
+const presence = createPresence({ scene, reducedMotion });
+function presenceState() {
+  return {
+    p: [player.position.x, player._physY, player.position.z],
+    y: player._yaw,
+    a: (player._inX !== 0 || player._inZ !== 0) ? 1 : 0,
+  };
+}
+function joinPresence(island) {
+  presence.connect(island, {
+    name: profile.name || defaultName,
+    body: profile.bodyColor,
+    getState: presenceState,
+  });
+}
+
 let activeWorld = world;
 
 const player = new Player(scene, world, {
@@ -455,6 +474,7 @@ const sync = createSync({
   onStatus: () => {},
 });
 sync.start();
+joinPresence('plaza');   // the starting island — others on the plaza appear
 
 // ── the foundry: pick a model, speak, watch it build ─────────────────────────
 const API_BASE = (localStorage.getItem('buildle_api_v1') || 'https://buildle-api.buildle.workers.dev').replace(/\/+$/, '');
@@ -847,6 +867,7 @@ world.onChange = scheduleSave;
 window.addEventListener('pagehide', () => {
   if (saveTimer) flushSave();
   sync.flush();
+  presence.disconnect();
 });
 
 function displayedStreak() {
@@ -949,6 +970,8 @@ const voyage = createVoyage({
     // when wandering off so it never floats over an unloaded plinth.
     ui.showFoundry(id === 'foundry');
     if (id !== 'foundry') foundry.clear();
+    // Rejoin the new island's presence room (connect closes the old socket).
+    joinPresence(id);
   },
 });
 
@@ -1124,6 +1147,7 @@ function tick() {
   botWorld.update(dt, t);
   gardener.update(dt, t);
   foundry.update(dt, t);
+  presence.update(dt, t);
   player.update(dt, t);
   views.update(dt, t);
   voyage.update(dt, t);   // after player/views so its camera + fov writes win

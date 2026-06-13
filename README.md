@@ -8,8 +8,12 @@ Buildle is a daily building ritual that lives in your browser. Every day there's
 
 A few things make it feel alive:
 
+- **The voyage** — tap the compass and the camera rises above the clouds until the whole archipelago becomes your map. Pick an island, sail there on a cinematic arc, and arrive to its name fading in over the dock.
+- **Seven islands** — the shared plaza, the gardener's isle, and five hand-authored worlds to wander: ember canyon and its waterfall leaping into the sky, the half-drowned ruins of lowtide, wicklight harbor's lantern strings, the hanging orchard's terraces, and the astronomer's reach piercing the fog.
+- **The foundry** — sail to the foundry, pick an AI model (DeepSeek, Gemini, GPT, Claude…), type what you want — "a cherry blossom tree", "a small cottage" — and watch the builder raise it block by block on the plinth. Different models build differently; it's a playable model garden.
+- **Live wanderers** — when someone else is on your island, you see them walking and building in real time, name and all.
 - **The song of the day** — a generative soundtrack (warm pads, slow phasing notes, rare chimes) is seeded from the date and phase-locked to UTC midnight, so everyone on Earth hears the same notes at the same moments. Your blocks play notes too: the higher you build, the higher the pitch.
-- **The gardener's island** — a smaller island floats off to the north-east where a little gardener builds something new every day, block by block, finishing around sunset. Tap the compass to visit. Look, don't touch.
+- **The gardener's island** — a little gardener builds something new every day, block by block, finishing around sunset.
 - **Photo mode and sky view** — hide the HUD, drift around your build with a tilt-shift lens, or rise into a slow overhead orbit. P and O on a keyboard, or the aperture button.
 - **The share clip** — one tap films an 8-second drone orbit of the island as a vertical video (with the soundtrack), ending on your postcard. Made for sharing.
 
@@ -79,14 +83,32 @@ Placement reaches six blocks from your character, so you'll do some walking. Tha
 | `capture.js` | the 8-second vertical share clip |
 | `bot.js` | the gardener — walks, builds, admires |
 | `botbuilds.js` | seven hand-authored daily builds |
+| `islands.js` | the archipelago registry, island loader, impostor baker |
+| `islands/*.js` | the hand-authored showcase islands |
+| `voyage.js` | the map mode, island flights, arrival cards |
+| `foundry.js` | the AI build animator + the builder NPC |
+| `presence.js` | live wanderers — remote avatars, interpolation |
+| `sync.js` | the shared-plaza client (polled deltas, charge meter) |
 | `prompts.js` | the 60 daily prompts + date logic |
-| `storage.js` | load/save abstraction (localStorage today, API tomorrow) |
+| `storage.js` | local save/load (streak, name) |
+| `server/` | the Cloudflare Worker — shared world, AI builds, presence |
+
+## The backend
+
+The [`server/`](server/) Cloudflare Worker is live at `buildle-api.buildle.workers.dev`:
+
+- **`IslandDO`** (SQLite) holds the shared plaza — polled deltas, a charge meter, daily reset with archives.
+- **`/api/build`** turns a prompt into a validated voxel build via OpenRouter (the foundry). The API key is a Worker secret; builds are rate-limited and moderated.
+- **`PresenceDO`** relays live positions over WebSockets — one ephemeral room per island.
+
+Deploy with `wrangler deploy` from `server/`; secrets via `wrangler secret put`.
 
 ## Roadmap
 
-- **Phase 1 — the ritual**: daily prompts, building, message blocks, streaks, share cards. Saved locally in your browser.
-- **Phase 2 — shared persistence** (built, awaiting deploy): a Cloudflare Worker + Durable Object backend lives in [`server/`](server/) — one shared world, polled sync, charge meter, daily reset with archives. The game ships with the sync adapter dormant; deploying the worker and setting its URL in `sync.js` turns the plaza truly shared.
-- **Phase 3 — live multiplayer**: see other wanderers walking and building around you in real time.
-- **Phase 4 — billboards + Vibeverse portal**: a few tasteful in-world billboards, and a portal to hop between worlds in the Vibeverse.
+- ✅ **The ritual** — daily prompts, building, message blocks, streaks, share cards.
+- ✅ **Shared persistence** — one true plaza on Cloudflare, polled sync, daily reset.
+- ✅ **The worlds** — the archipelago, the voyage, living water, the foundry's AI builds.
+- ✅ **Live wanderers** — see other people in real time.
+- **Next** — the model garden (vote on rival AI builds of the daily prompt), a gallery of past days, and a portal to neighboring worlds.
 
 Built with vanilla JavaScript and three.js. Beauty first.

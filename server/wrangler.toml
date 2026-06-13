@@ -17,6 +17,19 @@ head_sampling_rate = 1
 name = "PLAZA"
 class_name = "IslandDO"
 
+# Live wanderers (CONTRACT-W4): one ephemeral, in-memory room per island that
+# relays positions over WebSockets. Plain DO (no SQLite) — presence is never
+# persisted; a tab closing forgets you.
+[[durable_objects.bindings]]
+name = "PRESENCE"
+class_name = "PresenceDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["IslandDO"]
+
+# The free Workers plan requires every Durable Object to be SQLite-backed, even
+# though PresenceDO keeps all state in memory (it never touches ctx.storage.sql).
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["PresenceDO"]
