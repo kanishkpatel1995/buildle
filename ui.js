@@ -12,6 +12,7 @@ const JOY_TRAVEL = 56;        // knob travel radius in px; matches input radius 
 const TOAST_MS = 2200;
 const TOAST_GAP_MS = 320;     // fade-out breather between queued toasts
 const CELEBRATE_MS = 1900;
+const ARRIVAL_MS = 2400;      // arrival card fade in / hold / out (matches CSS)
 const SHARE_URL = 'buildle.zonivan.com';
 const CLOUD_WHITE = '#F7F1E8';
 const CARD_W = 2400;          // 1200×1500 postcard rendered at 2× for crispness
@@ -34,6 +35,11 @@ let promptTextEl, dayLineEl, paletteEl, soundBtn;
 let joyEl, knobEl, toastEl, celebrateEl;
 let overlayHelp, overlayNote, overlayComposer, overlayCtxlost;
 let shareMenuEl, viewsMenuEl, photoExitEl, filmingEl;
+let voyageCardEl, voyageNameEl, voyageEpithetEl, voyageSailEl, voyageStayEl;
+let arrivalEl, arrivalNameEl, arrivalEpithetEl;
+let voyageOnSail = null;
+let voyageOnStay = null;
+let arrivalTimer = 0;
 let swatchEls = [];
 let messageSlotEl = null;
 let openMenuCleanup = null;
@@ -223,6 +229,22 @@ export const ui = {
     viewsMenuEl = $('views-menu');
     photoExitEl = $('photo-exit');
     filmingEl = $('filming');
+    voyageCardEl = $('voyage-card');
+    voyageNameEl = $('voyage-name');
+    voyageEpithetEl = $('voyage-epithet');
+    voyageSailEl = $('voyage-sail');
+    voyageStayEl = $('voyage-stay');
+    arrivalEl = $('arrival-card');
+    arrivalNameEl = $('arrival-name');
+    arrivalEpithetEl = $('arrival-epithet');
+    voyageSailEl.addEventListener('click', () => {
+      audio.ui();
+      if (voyageOnSail) voyageOnSail();
+    });
+    voyageStayEl.addEventListener('click', () => {
+      audio.ui();
+      if (voyageOnStay) voyageOnStay();
+    });
 
     celebrateEl = document.createElement('div');
     celebrateEl.id = 'celebrate';
@@ -416,6 +438,40 @@ export const ui = {
 
   setHudHidden(b) {
     document.body.classList.toggle('hud-hidden', !!b);
+  },
+
+  // ── the voyage ────────────────────────────────────────────────────────
+
+  setVoyaging(b) {
+    closeMenus();
+    document.body.classList.toggle('voyaging', !!b);
+    if (!b) ui.hideVoyageCard();
+  },
+
+  voyageCard({ name, epithet, current, onSail, onStay }) {
+    voyageNameEl.textContent = name;
+    voyageEpithetEl.textContent = epithet;
+    voyageSailEl.textContent = current ? 'you are here' : 'sail';
+    voyageSailEl.disabled = !!current;
+    voyageOnSail = onSail;
+    voyageOnStay = onStay;
+    show(voyageCardEl);
+  },
+
+  hideVoyageCard() {
+    hide(voyageCardEl);
+    voyageOnSail = null;
+    voyageOnStay = null;
+  },
+
+  arrivalCard(name, epithet) {
+    arrivalNameEl.textContent = name;
+    arrivalEpithetEl.textContent = epithet;
+    arrivalEl.classList.remove('go');
+    void arrivalEl.offsetWidth; // restart the animation
+    arrivalEl.classList.add('go');
+    clearTimeout(arrivalTimer);
+    arrivalTimer = setTimeout(() => arrivalEl.classList.remove('go'), ARRIVAL_MS);
   },
 
   setPhotoMode(b) {

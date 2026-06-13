@@ -849,6 +849,124 @@ body.hud-hidden #hud {
   display: none;
 }
 
+/* ── The voyage: map mode chrome ───────────────────────────────────────── */
+/* The archipelago is the map — only the compass (the close affordance) and
+   the logo stay; everything else steps aside. */
+body.voyaging #palette,
+body.voyaging #prompt-pill {
+  display: none;
+}
+
+body.voyaging #actions .round-btn:not(#btn-compass) {
+  display: none;
+}
+
+#voyage-card {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 30;
+  min-width: 248px;
+  max-width: min(380px, calc(100vw - 24px));
+  padding: var(--space-2) var(--space-3);
+  text-align: center;
+  background: var(--card-fill);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-s);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-deep);
+  animation: card-in 240ms cubic-bezier(0.34, 1.3, 0.64, 1);
+}
+
+#voyage-card.hidden {
+  display: none;
+}
+
+#voyage-name {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 22px;
+  letter-spacing: 0.01em;
+}
+
+#voyage-epithet {
+  margin-top: 2px;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  color: rgba(247, 241, 232, 0.78);
+}
+
+#voyage-card .card-row button {
+  min-height: 44px;
+  min-width: 96px;
+  white-space: nowrap;
+}
+
+#voyage-sail:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+  filter: none;
+  box-shadow: none;
+}
+
+/* Arrival card: lower-third title, CSS-timed fade in / hold / out (2.4s).
+   Like #celebrate, .go carries opacity 1 so reduced motion still shows it
+   until ui.js lifts the class. */
+#arrival-card {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 22vh;
+  z-index: 35;
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+}
+
+#arrival-card.go {
+  opacity: 1;
+  animation: arrival-fade 2.4s ease forwards;
+}
+
+#arrival-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(36px, 7vw, 68px);
+  letter-spacing: 0.01em;
+  color: var(--cloud-white);
+  text-shadow: 0 6px 28px rgba(40, 20, 60, 0.55), 0 2px 8px rgba(40, 20, 60, 0.4);
+}
+
+#arrival-epithet {
+  margin-top: var(--space-1);
+  font-weight: 600;
+  font-size: clamp(14px, 2.4vw, 18px);
+  letter-spacing: 0.06em;
+  color: rgba(247, 241, 232, 0.88);
+  text-shadow: 0 2px 12px rgba(40, 20, 60, 0.5);
+}
+
+@keyframes arrival-fade {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  16% {
+    opacity: 1;
+    transform: none;
+  }
+  72% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 /* ── Filming: vertical letterbox + chrome ──────────────────────────────── */
 body.filming {
   background: #241636;

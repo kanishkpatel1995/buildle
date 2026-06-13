@@ -11,6 +11,8 @@ import { music } from './music.js';
 import { Views } from './views.js';
 import { capture } from './capture.js';
 import { Gardener } from './bot.js';
+import { ISLANDS, getIsland, loadShowcase, bakeImpostor } from './islands.js';
+import { createVoyage } from './voyage.js';
 import { createSync } from './sync.js';
 import { getToday } from './prompts.js';
 import { storageAvailable, loadWorld, saveWorld, loadPlayer, savePlayer } from './storage.js';
@@ -67,8 +69,6 @@ const GARDEN_SIZE = 26, GARDEN_RADIUS = 13;
 const GARDEN_STAND = { x: 70.5, z: -57.5 };
 const GARDEN_CENTER = new THREE.Vector3(70.5, 2, -69.5);
 const PLAZA_STAND = { x: 1, z: 16 };
-const TRAVEL_GLIDE_MS = 1300;                 // camera leads, player teleports behind it
-const TRAVEL_SETTLE_MS = 700;
 
 const DEFAULT_COLOR = 2;                      // terracotta — warm first swatch
 const SAVE_DEBOUNCE_MS = 400;
@@ -258,6 +258,11 @@ const SILHOUETTE_PARTS = [
 ];
 const silhouetteGeo = mergedBoxes(SILHOUETTE_PARTS);
 const fogColor3 = new THREE.Color(FOG_COLOR);
+// Painted scenery for ground-level haze only: the voyage's fog lift would
+// expose them as flat boards beside the real islands, so they dissolve as the
+// density drops below the ground floor (see the fade in tick()).
+const SILHOUETTE_FADE_LO = 0.001;             // gone at the voyage map density
+const silhouettes = [];
 for (const { pos, scale, mix, rot } of [
   // (the third silhouette became the gardener's real island at (70, -70))
   { pos: [-95, 4, -88], scale: 1.6, mix: 0.5, rot: 0.7 },
@@ -266,6 +271,7 @@ for (const { pos, scale, mix, rot } of [
   const island = new THREE.Mesh(silhouetteGeo, new THREE.MeshBasicMaterial({
     color: new THREE.Color(SILHOUETTE_PLUM).lerp(fogColor3, mix),
     fog: false,
+    transparent: true,
   }));
   island.position.set(pos[0], pos[1], pos[2]);
   island.scale.setScalar(scale);
@@ -273,6 +279,7 @@ for (const { pos, scale, mix, rot } of [
   island.matrixAutoUpdate = false;
   island.updateMatrix();
   scene.add(island);
+  silhouettes.push(island);
 }
 
 // Prompt banner: the signature element, floating above the plaza center.
@@ -415,30 +422,6 @@ const gardener = new Gardener(scene, botWorld, { reducedMotion });
 gardener.onPlace = (y, c) => music.notePlaced(y, c, true);
 
 let activeWorld = world;
-let traveling = false;
-
-// TEMP — W1 dev hook (removed in W3 when the voyage lands). With
-// localStorage.buildle_testisle = '1' the showcase pipeline goes live: the
-// proving ground loads lazily, the impostor baker runs once, and the compass
-// cycle becomes plaza → gardener → proving ground → plaza. Without the flag
-// nothing here executes and travel stays exactly as shipped.
-let testIsle = null;
-(async () => {
-  let flagId = null;
-  try {
-    const v = localStorage.getItem('buildle_testisle');
-    if (v) flagId = v === '1' ? 'test-isle' : v;   // '1' = legacy; any other value names an island id
-  } catch { /* storage may be walled off */ }
-  if (!flagId) return;
-  const { loadShowcase, bakeImpostor } = await import('./islands.js');
-  const isle = await loadShowcase(flagId, scene, { reducedMotion });
-  // bake once to exercise the pipeline end to end; the live island is already
-  // in the scene, so keeping the billboard would double-draw — release it
-  const impostor = bakeImpostor(renderer, scene, isle);
-  impostor.material.map.dispose();
-  impostor.material.dispose();
-  testIsle = isle;
-})();
 
 const player = new Player(scene, world, {
   name: profile.name || defaultName,
@@ -526,7 +509,7 @@ const inBounds = (x, y, z) =>
   x >= WORLD_MIN && x <= WORLD_MAX && z >= WORLD_MIN && z <= WORLD_MAX && y >= 0 && y < WORLD_HEIGHT;
 
 async function attemptPlace(clientX, clientY) {
-  if (views.mode !== 'follow' || traveling) return;
+  if (views.mode !== 'follow' || voyage.active) return;
   const hit = pickAt(clientX, clientY);
   if (!hit) return;
   if (hit.block && hit.block.m) {
@@ -536,7 +519,7 @@ async function attemptPlace(clientX, clientY) {
     return;
   }
   if (!activeWorld.buildable) {
-    ui.toast("the gardener's island — look, don't touch");
+    ui.toast(`${getIsland(voyage.currentIsland).name} — look, don't touch`);
     return;
   }
   if (!hit.placeCell) return;
@@ -581,11 +564,11 @@ async function attemptPlace(clientX, clientY) {
 }
 
 function attemptRemove(clientX, clientY) {
-  if (views.mode !== 'follow' || traveling) return;
+  if (views.mode !== 'follow' || voyage.active) return;
   const hit = pickAt(clientX, clientY);
   if (!hit || !hit.removeCell) return;
   if (!activeWorld.buildable) {
-    ui.toast("the gardener's island — look, don't touch");
+    ui.toast(`${getIsland(voyage.currentIsland).name} — look, don't touch`);
     return;
   }
   if (!hit.inRange) { ui.toast('too far away — walk closer'); return; }
@@ -624,7 +607,7 @@ function touchDown(e) {
     role: 'look', x0: e.clientX, y0: e.clientY, lx: e.clientX, ly: e.clientY,
     t0: performance.now(), travel: 0, consumed: false, timer: 0, shown: false,
   };
-  if (joystickId === -1 && e.clientX < viewW / 2 && views.mode === 'follow' && !traveling) {
+  if (joystickId === -1 && e.clientX < viewW / 2 && views.mode === 'follow' && !voyage.active) {
     // left half claims the joystick role, but taps and long-presses still
     // work there — the stick only takes over once the finger really drags
     p.role = 'stick';
@@ -765,7 +748,11 @@ window.addEventListener('keydown', (e) => {
   const t = e.target;
   if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || (t && t.isContentEditable)) return;
   const key = e.key.toLowerCase();
-  if (key === 'escape') { setViewMode('follow'); return; }
+  if (key === 'escape') {
+    if (voyage.active) voyage.close();
+    else setViewMode('follow');
+    return;
+  }
   if (MOVE_KEYS.has(key)) {
     keys.add(key);
     if (key.startsWith('arrow')) e.preventDefault();
@@ -782,7 +769,7 @@ window.addEventListener('blur', () => keys.clear());
 function updateGhost(t) {
   let visible = false;
   if (lastPointerType !== 'touch' && pointerInside && !(mouse.down && mouse.dragging) && !contextLost &&
-      views.mode === 'follow' && !traveling && activeWorld.buildable) {
+      views.mode === 'follow' && !voyage.active && activeWorld.buildable) {
     const hit = pickAt(mouse.x, mouse.y);
     if (hit && hit.placeCell && hit.inRange && !(hit.block && hit.block.m)) {
       const { x, y, z } = hit.placeCell;
@@ -866,10 +853,8 @@ async function shareFlow() {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 function setViewMode(modeName) {
-  if (capture.busy || traveling) return;
+  if (capture.busy || voyage.active) return;
   if (modeName === views.mode) return;
   views.setMode(modeName);
   ui.setPhotoMode(modeName === 'photo');
@@ -882,7 +867,7 @@ function setViewMode(modeName) {
 }
 
 function openViewsMenu() {
-  if (capture.busy || traveling) return;
+  if (capture.busy || voyage.active) return;
   const items = [];
   if (views.mode !== 'photo') items.push({ label: 'photo mode', onPick: () => setViewMode('photo') });
   if (views.mode !== 'sky') items.push({ label: 'sky view', onPick: () => setViewMode('sky') });
@@ -890,49 +875,45 @@ function openViewsMenu() {
   ui.openViewsMenu(items);
 }
 
-// Plaza ⇄ the gardener's island: the camera leads the way, the player follows.
-// The W1 dev flag splices the proving ground in after the gardener's isle.
-async function travel() {
-  if (traveling || capture.busy || modalOpen) return;
-  traveling = true;
-  setViewModeSafe('follow');
-  let dest, destWorld, arrival;
-  if (activeWorld === world) {
-    dest = GARDEN_STAND;
-    destWorld = botWorld;
-    arrival = "the gardener's island — look, don't touch";
-  } else if (activeWorld === botWorld && testIsle) {
-    dest = testIsle.dockSpawn;
-    destWorld = testIsle.world;
-    arrival = "the proving ground — look, don't touch";
-  } else {
-    dest = PLAZA_STAND;
-    destWorld = world;
-    arrival = 'back to the plaza';
-  }
-  audio.ui();
-  views.setMode('photo', { center: new THREE.Vector3(dest.x, 2.5, dest.z) });
-  await sleep(TRAVEL_GLIDE_MS);
-  player.position.set(dest.x, 0, dest.z);
-  player._physY = 0;
-  player._velY = 0;
-  player.setWorld(destWorld);
-  activeWorld = destWorld;
-  await sleep(TRAVEL_SETTLE_MS);
-  views.setMode('follow');
-  traveling = false;
-  ui.toast(arrival);
-}
+// The voyage: the compass lifts the camera to map altitude; the archipelago
+// itself is the map. Arrival teleports the player in behind the descending
+// camera, exactly the way the old travel() glide did.
+const voyage = createVoyage({
+  scene, renderer, player, views, ui,
+  islands: { ISLANDS, getIsland, loadShowcase, bakeImpostor },
+  residents: {
+    plaza: { world, stand: PLAZA_STAND },
+    gardeners: { world: botWorld, stand: GARDEN_STAND },
+  },
+  reducedMotion,
+  onArrive: (id, { world: destWorld, dockSpawn }) => {
+    activeWorld = destWorld;
+    player.setWorld(destWorld);
+    player.position.set(dockSpawn.x, 0, dockSpawn.z);
+    player._physY = 0;
+    player._velY = 0;
+    // swing the follow rig behind the arrival shot so the handback glide
+    // keeps the composed dock vista instead of whipping to a stale azimuth
+    const o = getIsland(id).origin;
+    if (dockSpawn.x !== o.x || dockSpawn.z !== o.z) {
+      player._camYaw = Math.atan2(dockSpawn.x - o.x, dockSpawn.z - o.z);
+    }
+  },
+});
 
-// setViewMode without the traveling guard — travel() manages its own camera.
-function setViewModeSafe(modeName) {
-  ui.setPhotoMode(false);
-  ui.setHudHidden(false);
-  if (views.mode !== 'follow' && modeName === 'follow') views.setMode('follow');
+function compassFlow() {
+  if (capture.busy || modalOpen) return;
+  audio.ui();
+  if (voyage.active) {
+    voyage.close();
+    return;
+  }
+  if (views.mode !== 'follow') setViewMode('follow');
+  voyage.open();
 }
 
 function openShareMenu() {
-  if (capture.busy || traveling) return;
+  if (capture.busy || voyage.active) return;
   const items = [{ label: 'postcard', onPick: () => { audio.ui(); shareFlow(); } }];
   if (capture.isSupported()) {
     items.push({ label: 'clip · 8s', onPick: () => { audio.ui(); clipFlow(); } });
@@ -941,7 +922,7 @@ function openShareMenu() {
 }
 
 async function clipFlow() {
-  if (capture.busy || traveling) return;
+  if (capture.busy || voyage.active) return;
   refreshDay();
   ensureAudioAndMusic();
   const onGarden = activeWorld === botWorld;
@@ -1017,7 +998,7 @@ ui.init({
   },
   onHelp: () => { audio.ui(); helpFlow(); },
   onViews: openViewsMenu,
-  onCompass: travel,
+  onCompass: compassFlow,
   onExitView: () => setViewMode('follow'),
 });
 ui.setPrompt(TODAY.prompt, TODAY.day);
@@ -1070,6 +1051,7 @@ function fadeOut() {
 
 const clock = new THREE.Clock();
 let firstFrame = true;
+let cloudsHiddenFor = false;   // tracks the last voyage state we synced clouds to
 let dayCheckT = 0;
 
 function tick() {
@@ -1079,7 +1061,7 @@ function tick() {
   dayCheckT += dt;
   if (dayCheckT > 5) { dayCheckT = 0; refreshDay(); }
   if (joystickId === -1) {
-    if (views.mode === 'follow' && !traveling) {
+    if (views.mode === 'follow' && !voyage.active) {
       const kx = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
       const kz = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0);
       player.setMoveInput(kx, kz);
@@ -1089,19 +1071,36 @@ function tick() {
   }
   world.update(dt, t);
   botWorld.update(dt, t);
-  if (testIsle) testIsle.world.update(dt, t);
   gardener.update(dt, t);
   player.update(dt, t);
   views.update(dt, t);
+  voyage.update(dt, t);   // after player/views so its camera + fov writes win
+  // The plaza's drift-clouds are ground-level atmosphere; from the voyage map
+  // altitude they read as flat slabs, so hide them while the voyage owns the
+  // camera (toggle only on transitions).
+  if (voyage.active !== cloudsHiddenFor) {
+    cloudsHiddenFor = voyage.active;
+    for (const cloud of clouds) cloud.visible = !voyage.active;
+  }
+  // Painted horizon dissolves as the fog thins below every ground-level state.
+  const silAlpha = Math.min(1, Math.max(0,
+    (scene.fog.density - SILHOUETTE_FADE_LO) / (FOG_DENSITY_MIN - SILHOUETTE_FADE_LO)));
+  for (const s of silhouettes) {
+    s.material.opacity = silAlpha;
+    s.visible = silAlpha > 0.02;
+  }
   water.update(dt);
   updateEnvironment(dt, t);
   updateGhost(t);
   // Distance-compensated fog: the camera pulling away from the player eases
   // the density down, so a zoomed-out island never drowns in the haze.
-  const fogDist = player.camera.position.distanceTo(player.position);
-  const fogTarget = Math.min(FOG_DENSITY, Math.max(FOG_DENSITY_MIN,
-    FOG_DENSITY * (FOG_COMP_NEAR / Math.max(fogDist, FOG_COMP_NEAR))));
-  scene.fog.density += (fogTarget - scene.fog.density) * (1 - Math.exp(-FOG_COMP_RATE * dt));
+  // The voyage owns the fog while it is active (the ascent lifts it).
+  if (!voyage.active) {
+    const fogDist = player.camera.position.distanceTo(player.position);
+    const fogTarget = Math.min(FOG_DENSITY, Math.max(FOG_DENSITY_MIN,
+      FOG_DENSITY * (FOG_COMP_NEAR / Math.max(fogDist, FOG_COMP_NEAR))));
+    scene.fog.density += (fogTarget - scene.fog.density) * (1 - Math.exp(-FOG_COMP_RATE * dt));
+  }
   if (!contextLost) renderer.render(scene, player.camera);
   if (firstFrame) {
     firstFrame = false;
