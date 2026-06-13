@@ -37,8 +37,11 @@ let overlayHelp, overlayNote, overlayComposer, overlayCtxlost;
 let shareMenuEl, viewsMenuEl, photoExitEl, filmingEl;
 let voyageCardEl, voyageNameEl, voyageEpithetEl, voyageSailEl, voyageStayEl;
 let arrivalEl, arrivalNameEl, arrivalEpithetEl;
+let foundryChatEl, foundryModelEl, foundryPromptEl, foundryBuildEl, foundryStatusEl;
 let voyageOnSail = null;
 let voyageOnStay = null;
+let foundryOnBuild = null;
+let foundryBusy = false;
 let arrivalTimer = 0;
 let swatchEls = [];
 let messageSlotEl = null;
@@ -472,6 +475,70 @@ export const ui = {
     arrivalEl.classList.add('go');
     clearTimeout(arrivalTimer);
     arrivalTimer = setTimeout(() => arrivalEl.classList.remove('go'), ARRIVAL_MS);
+  },
+
+  // ── the foundry (agent chat) ────────────────────────────────────────────
+
+  initFoundry({ models, onBuild }) {
+    const firstInit = !foundryChatEl;
+    foundryChatEl = $('foundry-chat');
+    foundryModelEl = $('foundry-model');
+    foundryPromptEl = $('foundry-prompt');
+    foundryBuildEl = $('foundry-build');
+    foundryStatusEl = $('foundry-status');
+    foundryOnBuild = onBuild;
+
+    foundryModelEl.replaceChildren(...(models || []).map(({ id, label, blurb }) => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = blurb ? `${label} — ${blurb}` : label;
+      return opt;
+    }));
+
+    // Bind once: the submit closure reads the live module-level state
+    // (foundryOnBuild/foundryBusy), so re-init never needs new listeners.
+    if (firstInit) {
+      const submit = () => {
+        if (foundryBusy) return;
+        const prompt = foundryPromptEl.value.trim();
+        if (!prompt) return;
+        audio.ui();
+        if (foundryOnBuild) foundryOnBuild(foundryModelEl.value, prompt);
+      };
+      foundryBuildEl.addEventListener('click', submit);
+      foundryPromptEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submit();
+        }
+      });
+    }
+  },
+
+  showFoundry(visible) {
+    if (visible) {
+      show(foundryChatEl);
+    } else {
+      hide(foundryChatEl);
+      ui.setFoundryStatus('');
+    }
+  },
+
+  setFoundryStatus(text) {
+    foundryStatusEl.textContent = text || '';
+    foundryStatusEl.classList.toggle('show', !!text);
+  },
+
+  setFoundryBusy(busy) {
+    foundryBusy = !!busy;
+    foundryBuildEl.disabled = foundryBusy;
+    foundryPromptEl.disabled = foundryBusy;
+    foundryModelEl.disabled = foundryBusy;
+    foundryBuildEl.textContent = foundryBusy ? 'building…' : 'build';
+  },
+
+  getFoundryModel() {
+    return foundryModelEl ? foundryModelEl.value : '';
   },
 
   setPhotoMode(b) {

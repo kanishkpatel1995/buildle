@@ -103,6 +103,195 @@ function helloThrottled(ip) {
   return false;
 }
 
+// --- AI build (/api/build): a stateless OpenRouter proxy. The foundry island
+// is client-local, so no world state is touched — we just turn a prompt into a
+// validated list of blocks for the client to animate into place. ---
+
+// The curated model lineup (verified live on OpenRouter). Order = dropdown
+// order; the first is the default. label/blurb are shown in the UI.
+const BUILD_MODELS = [
+  { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', blurb: 'quick and clever' },
+  { id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', blurb: 'google, balanced' },
+  { id: 'google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', blurb: 'feather-light' },
+  { id: 'openai/gpt-5.4-nano', label: 'GPT-5.4 Nano', blurb: 'openai, tiny' },
+  { id: 'openai/gpt-4.1-mini', label: 'GPT-4.1 Mini', blurb: 'openai, steady' },
+  { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5', blurb: 'anthropic, tasteful' },
+];
+const BUILD_MODEL_IDS = new Set(BUILD_MODELS.map((m) => m.id));
+
+const BUILD_ENVELOPE = 24;        // builds fit in a 24×24×24 box, origin corner (0,0,0)
+const BUILD_MAX_OPS = 96;         // primitives the model may emit
+const BUILD_MAX_BLOCKS = 3000;    // expanded-cell cap (drops the rest)
+const BUILD_PROMPT_MAX = 200;
+const BUILD_TIMEOUT_MS = 45000;
+const BUILD_PER_HOUR = 40;        // per-IP
+
+// One filled box per op (a single block is 1×1×1) — a uniform shape keeps the
+// JSON schema strict-mode friendly and trivial to expand.
+const PALETTE_LEGEND =
+  '0 cloud white, 1 sandstone, 2 terracotta, 3 rose clay, 4 dusty plum, ' +
+  '5 twilight blue, 6 teal lagoon, 7 sage green, 8 olive gold, 9 honey, ' +
+  '10 ember orange, 11 brick red, 12 cocoa brown, 13 slate grey, 14 ink black, ' +
+  '15 glow lantern (emissive, use sparingly for lights)';
+
+// We use plain JSON mode (json_object) rather than a strict json_schema: strict
+// schemas aren't portable across providers (Anthropic rejects maxItems, Gemini's
+// compiler chokes on integer-heavy arrays). The shape is pinned by the prompt's
+// example instead, and expandOps() clamps every field defensively.
+const BUILD_EXAMPLE =
+  '{"name":"little tree","ops":[' +
+  '{"x":11,"y":0,"z":11,"w":2,"h":4,"d":2,"c":12},' +
+  '{"x":9,"y":4,"z":9,"w":6,"h":4,"d":6,"c":7},' +
+  '{"x":10,"y":8,"z":10,"w":4,"h":2,"d":4,"c":8}]}';
+
+const buildHits = new Map();
+function buildThrottled(ip) {
+  const now = Date.now();
+  const cutoff = now - 3600000;
+  let hits = buildHits.get(ip);
+  if (!hits) buildHits.set(ip, (hits = []));
+  while (hits.length && hits[0] < cutoff) hits.shift();
+  if (hits.length >= BUILD_PER_HOUR) return true;
+  hits.push(now);
+  if (buildHits.size > 20000) {
+    for (const [k, v] of buildHits) if (!v.length || v[v.length - 1] < cutoff) buildHits.delete(k);
+  }
+  return false;
+}
+
+function clampInt(v, lo, hi) {
+  v = Math.round(Number(v));
+  if (!Number.isFinite(v)) return lo;
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
+// Expand filled-box ops into a deduped cell list (last-write-wins), clamped to
+// the build envelope and the block cap.
+function expandOps(ops) {
+  const cells = new Map();
+  const E = BUILD_ENVELOPE - 1;
+  for (const op of ops) {
+    if (!op || typeof op !== 'object') continue;
+    const c = clampInt(op.c, 0, 15);
+    const x0 = clampInt(op.x, 0, E), y0 = clampInt(op.y, 0, E), z0 = clampInt(op.z, 0, E);
+    const w = clampInt(op.w, 1, BUILD_ENVELOPE), h = clampInt(op.h, 1, BUILD_ENVELOPE), d = clampInt(op.d, 1, BUILD_ENVELOPE);
+    for (let dx = 0; dx < w; dx++) {
+      const x = x0 + dx; if (x > E) break;
+      for (let dy = 0; dy < h; dy++) {
+        const y = y0 + dy; if (y > E) break;
+        for (let dz = 0; dz < d; dz++) {
+          const z = z0 + dz; if (z > E) break;
+          cells.set(x + ',' + y + ',' + z, [x, y, z, c]);
+          if (cells.size >= BUILD_MAX_BLOCKS) break;
+        }
+        if (cells.size >= BUILD_MAX_BLOCKS) break;
+      }
+      if (cells.size >= BUILD_MAX_BLOCKS) break;
+    }
+    if (cells.size >= BUILD_MAX_BLOCKS) break;
+  }
+  return [...cells.values()];
+}
+
+function parseBuildJson(content) {
+  if (typeof content !== 'string') return null;
+  try { return JSON.parse(content); } catch { /* fall through to brace-scan */ }
+  const a = content.indexOf('{');
+  const b = content.lastIndexOf('}');
+  if (a !== -1 && b > a) {
+    try { return JSON.parse(content.slice(a, b + 1)); } catch { /* give up */ }
+  }
+  return null;
+}
+
+// Single OpenRouter call with a timeout. Returns the Response (ok or not), or
+// null on network/timeout failure.
+async function callModel(env, payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BUILD_TIMEOUT_MS);
+  try {
+    return await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+        'content-type': 'application/json',
+        'HTTP-Referer': 'https://buildle.zonivan.com',
+        'X-Title': 'Buildle',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function aiBuild(request, env) {
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  if (buildThrottled(ip)) return json({ error: 'the foundry is catching its breath — try again soon' }, 429);
+  if (!env.OPENROUTER_API_KEY) return json({ error: 'the foundry is offline' }, 503);
+
+  const body = await readJson(request);
+  if (!body) return json({ error: 'bad request' }, 400);
+
+  const model = BUILD_MODEL_IDS.has(body.model) ? body.model : BUILD_MODELS[0].id;
+  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+  if (prompt.length < 1) return json({ error: 'tell the builder what to make' }, 400);
+  if (prompt.length > BUILD_PROMPT_MAX) return json({ error: 'keep the request short and sweet' }, 400);
+  if (matcher.hasMatch(prompt)) return json({ error: "let's keep it kind" }, 400);
+
+  const system =
+    'You are the foundry builder in Buildle, a cozy golden-hour voxel game. ' +
+    'Turn the player\'s request into a small, charming voxel sculpture made of filled boxes.\n' +
+    `Coordinates: integers in a ${BUILD_ENVELOPE}x${BUILD_ENVELOPE}x${BUILD_ENVELOPE} box, corner at (0,0,0). ` +
+    'y is up; the build rests on the ground at y=0. Center the build horizontally around x,z = 12.\n' +
+    `Each op is one filled box: x,y,z is its near-bottom-left corner, w,h,d its size (>=1), c its color. ` +
+    'A single block is w=h=d=1. Use big boxes for masses (walls, trunks, roofs) and single blocks for detail.\n' +
+    `Palette (c = index): ${PALETTE_LEGEND}.\n` +
+    'Pick colors that suit the subject and the warm sunset world. Keep it readable and well-proportioned; ' +
+    `a good build is 15-60 ops, at most ${BUILD_MAX_OPS}.\n` +
+    `Reply with ONLY a JSON object of this exact shape, no markdown, no prose:\n${BUILD_EXAMPLE}`;
+
+  const base = {
+    model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: prompt },
+    ],
+    temperature: 0.8,
+    max_tokens: 8000,
+  };
+
+  // Try with json_object mode first; if a provider rejects it, retry once on
+  // pure prompt-driven JSON (the brace-scan parser handles either).
+  let res = await callModel(env, { ...base, response_format: { type: 'json_object' } });
+  if (res && !res.ok && res.status >= 400 && res.status < 500) {
+    res = await callModel(env, base);
+  }
+  if (!res) return json({ error: 'the builder took too long — try again' }, 504);
+  if (!res.ok) {
+    return json({ error: 'that model is busy right now — try another' }, 502);
+  }
+  const data = await res.json().catch(() => null);
+  const content = data && data.choices && data.choices[0] && data.choices[0].message
+    ? data.choices[0].message.content
+    : null;
+  const parsed = parseBuildJson(content);
+  if (!parsed || !Array.isArray(parsed.ops)) {
+    return json({ error: 'the builder got confused — try rephrasing' }, 422);
+  }
+  const blocks = expandOps(parsed.ops.slice(0, BUILD_MAX_OPS));
+  if (blocks.length === 0) {
+    return json({ error: 'the builder drew a blank — try rephrasing' }, 422);
+  }
+  const name = typeof parsed.name === 'string' && parsed.name.trim()
+    ? parsed.name.trim().slice(0, 60)
+    : prompt.slice(0, 60);
+  return json({ name, model, count: blocks.length, blocks });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
@@ -110,6 +299,12 @@ export default {
     }
     const url = new URL(request.url);
     if (!url.pathname.startsWith('/api/')) return json({ error: 'not found' }, 404);
+    if (url.pathname === '/api/build' && request.method === 'POST') {
+      return await aiBuild(request, env);
+    }
+    if (url.pathname === '/api/models' && request.method === 'GET') {
+      return json({ models: BUILD_MODELS });
+    }
     if (url.pathname === '/api/hello' && request.method === 'POST') {
       const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
       if (helloThrottled(ip)) return json({ error: 'slow down' }, 429);

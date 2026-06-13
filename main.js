@@ -13,6 +13,7 @@ import { capture } from './capture.js';
 import { Gardener } from './bot.js';
 import { ISLANDS, getIsland, loadShowcase, bakeImpostor } from './islands.js';
 import { createVoyage } from './voyage.js';
+import { createFoundry } from './foundry.js';
 import { createSync } from './sync.js';
 import { getToday } from './prompts.js';
 import { storageAvailable, loadWorld, saveWorld, loadPlayer, savePlayer } from './storage.js';
@@ -421,6 +422,11 @@ botWorld.load(null);
 const gardener = new Gardener(scene, botWorld, { reducedMotion });
 gardener.onPlace = (y, c) => music.notePlaced(y, c, true);
 
+// The foundry's build animator owns its own World (the summoned builds land on
+// the plinth at the foundry island's origin); the island ground itself loads
+// via the voyage like any showcase island.
+const foundry = createFoundry({ scene, reducedMotion });
+
 let activeWorld = world;
 
 const player = new Player(scene, world, {
@@ -449,6 +455,47 @@ const sync = createSync({
   onStatus: () => {},
 });
 sync.start();
+
+// ── the foundry: pick a model, speak, watch it build ─────────────────────────
+const API_BASE = (localStorage.getItem('buildle_api_v1') || 'https://buildle-api.buildle.workers.dev').replace(/\/+$/, '');
+const FALLBACK_MODELS = [{ id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', blurb: 'quick and clever' }];
+let foundryModels = FALLBACK_MODELS;
+
+async function onFoundryBuild(model, prompt) {
+  ui.setFoundryBusy(true);
+  ui.setFoundryStatus('the builder is dreaming…');
+  music.duck();
+  let data;
+  try {
+    const res = await fetch(API_BASE + '/api/build', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model, prompt }),
+    });
+    data = await res.json();
+  } catch {
+    ui.setFoundryStatus('the foundry is resting — try again');
+    ui.setFoundryBusy(false);
+    return;
+  }
+  if (!data || data.error || !Array.isArray(data.blocks)) {
+    ui.setFoundryStatus((data && data.error) || 'the builder got confused — try rephrasing');
+    ui.setFoundryBusy(false);
+    return;
+  }
+  ui.setFoundryStatus(`placing ${data.count} blocks…`);
+  await foundry.build(data.blocks);
+  const label = (foundryModels.find((m) => m.id === data.model) || {}).label || 'the builder';
+  ui.setFoundryStatus(`“${data.name}” — built by ${label}`);
+  ui.setFoundryBusy(false);
+}
+
+// Load the model lineup from the API (falls back to a single model offline).
+fetch(API_BASE + '/api/models')
+  .then((r) => r.json())
+  .then((d) => { if (d && Array.isArray(d.models) && d.models.length) foundryModels = d.models; })
+  .catch(() => {})
+  .finally(() => ui.initFoundry({ models: foundryModels, onBuild: onFoundryBuild }));
 
 // Audio + the song of the day both wake on the first user gesture.
 function ensureAudioAndMusic() {
@@ -898,6 +945,10 @@ const voyage = createVoyage({
     if (dockSpawn.x !== o.x || dockSpawn.z !== o.z) {
       player._camYaw = Math.atan2(dockSpawn.x - o.x, dockSpawn.z - o.z);
     }
+    // The foundry's chat appears only on the foundry; clear any summoned build
+    // when wandering off so it never floats over an unloaded plinth.
+    ui.showFoundry(id === 'foundry');
+    if (id !== 'foundry') foundry.clear();
   },
 });
 
@@ -1072,6 +1123,7 @@ function tick() {
   world.update(dt, t);
   botWorld.update(dt, t);
   gardener.update(dt, t);
+  foundry.update(dt, t);
   player.update(dt, t);
   views.update(dt, t);
   voyage.update(dt, t);   // after player/views so its camera + fov writes win

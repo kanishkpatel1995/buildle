@@ -84,6 +84,17 @@
   <div id="share-menu" class="mini-menu hidden" role="menu" aria-label="share"></div>
   <div id="views-menu" class="mini-menu hidden" role="menu" aria-label="camera views"></div>
 
+  <div id="foundry-chat" class="hidden" role="form" aria-label="the foundry">
+    <div id="foundry-title">the foundry</div>
+    <div id="foundry-row">
+      <select id="foundry-model" aria-label="model"></select>
+      <input id="foundry-prompt" type="text" maxlength="200" autocomplete="off"
+             autocapitalize="off" spellcheck="false" placeholder="what should we build?" />
+      <button id="foundry-build" class="button-primary" type="button">build</button>
+    </div>
+    <div id="foundry-status" role="status" aria-live="polite"></div>
+  </div>
+
   <div id="tilt-top" class="tilt-band" aria-hidden="true"></div>
   <div id="tilt-bottom" class="tilt-band" aria-hidden="true"></div>
   <button id="photo-exit" class="hidden" type="button">tap to return</button>
