@@ -732,6 +732,9 @@ textarea:focus-visible {
 
   #actions {
     flex-direction: row;
+    flex-wrap: wrap-reverse;
+    justify-content: flex-end;
+    max-width: calc(100vw - var(--space-2));
     right: var(--space-1);
     bottom: calc(80px + env(safe-area-inset-bottom, 0px));
   }
@@ -749,29 +752,6 @@ textarea:focus-visible {
     min-height: 44px;
   }
 
-  /* The foundry goes full-width and stacks; the prompt + build sit on one
-     row, the model picker rides above so all targets stay ≥44px and clear
-     of the bottom thumb zone. */
-  #foundry-chat {
-    left: var(--space-1);
-    right: var(--space-1);
-    transform: none;
-    width: auto;
-    bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
-  }
-
-  #foundry-row {
-    flex-wrap: wrap;
-  }
-
-  #foundry-model {
-    flex: 1 1 100%;
-    max-width: none;
-  }
-
-  #foundry-prompt {
-    flex: 1 1 auto;
-  }
 }
 
 /* ── Mini-menus (share / views) ────────────────────────────────────────── */
@@ -885,11 +865,11 @@ body.voyaging #actions .round-btn:not(#btn-compass) {
   display: none;
 }
 
-/* The foundry chat belongs to ground-level play; the voyage, photo mode, and
+/* The live chat belongs to ground-level play; the voyage, photo mode, and
    filming all take the camera away, so it steps aside in each. */
-body.voyaging #foundry-chat,
-body.hud-hidden #foundry-chat,
-body.filming #foundry-chat {
+body.voyaging #chat,
+body.hud-hidden #chat,
+body.filming #chat {
   display: none;
 }
 
@@ -999,156 +979,477 @@ body.filming #foundry-chat {
   }
 }
 
-/* ── The foundry: agent chat panel ─────────────────────────────────────── */
-/* Frosted card, bottom-center above the palette row. The lectern's chat:
-   pick a model, type a request, watch the build place itself. */
-#foundry-chat {
+/* ── The Commons: one live chat (talk + /build) ────────────────────────── */
+/* A gradient-transparent rail that the world plays through. pointer-events are
+   off on the panel itself; only the feed, composer, and toggles catch the
+   pointer, so dragging to orbit still works behind chat. Desktop = right rail,
+   phones = a peek that taps open to a sheet (see the media query below). */
+#chat {
   position: fixed;
-  left: 50%;
-  bottom: calc(72px + env(safe-area-inset-bottom, 0px));
-  transform: translateX(-50%);
   z-index: 30;
-  width: min(560px, calc(100vw - 32px));
-  padding: var(--space-2);
-  pointer-events: auto;
-  background: var(--card-fill);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-s);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  box-shadow: var(--shadow-deep);
-  animation: card-in 240ms cubic-bezier(0.34, 1.3, 0.64, 1);
+  right: 0;
+  top: calc(60px + env(safe-area-inset-top, 0px));
+  bottom: calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;          /* world stays interactive behind the rail */
+  /* transparent at the top, dusk-plum gathering toward the composer */
+  background: linear-gradient(to bottom,
+    rgba(43, 29, 58, 0) 0%,
+    rgba(43, 29, 58, 0) 32%,
+    rgba(40, 25, 56, 0.28) 72%,
+    rgba(34, 20, 50, 0.52) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 8%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 8%);
+  animation: chat-in 260ms cubic-bezier(0.34, 1.2, 0.64, 1);
 }
 
-#foundry-chat.hidden {
-  display: none;
+@keyframes chat-in {
+  from { opacity: 0; transform: translateX(18px); }
+  to { opacity: 1; transform: none; }
 }
 
-#foundry-title {
-  margin-bottom: var(--space-1);
-  font-family: var(--font-display);
-  font-weight: 500;
-  font-size: 18px;
-  letter-spacing: 0.01em;
-  text-align: center;
-}
-
-#foundry-row {
+#chat-head {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  justify-content: space-between;
+  padding: 0 var(--space-2) var(--space-1);
+  pointer-events: auto;
 }
 
-#foundry-model,
-#foundry-prompt {
-  height: 44px;
+.chat-count {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  color: rgba(247, 241, 232, 0.72);
+  text-shadow: 0 1px 4px rgba(20, 10, 30, 0.6);
+}
+.chat-count::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #86E0A8;
+  box-shadow: 0 0 6px rgba(134, 224, 168, 0.9);
+  vertical-align: middle;
+}
+
+#chat-collapse,
+#chat-tab {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  color: rgba(247, 241, 232, 0.85);
+  background: rgba(43, 29, 58, 0.32);
+  pointer-events: auto;
+  transition: background 150ms ease;
+}
+#chat-collapse:hover,
+#chat-tab:hover { background: rgba(43, 29, 58, 0.55); }
+#chat-collapse svg,
+#chat-tab svg { width: 16px; height: 16px; }
+
+/* The reopen tab — only visible while the rail is collapsed. */
+#chat-tab {
+  position: absolute;
+  top: 0;
+  right: var(--space-2);
+  width: 36px;
+  height: 36px;
+  display: none;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--glass-border);
+}
+#chat-tab svg { width: 18px; height: 18px; }
+
+/* ── the feed ── */
+#chat-feed {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 3px;
+  padding: 0 var(--space-2);
+  pointer-events: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(247, 241, 232, 0.25) transparent;
+  /* older lines dissolve upward into the transparent top */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 14%);
+}
+#chat-feed::-webkit-scrollbar { width: 6px; }
+#chat-feed::-webkit-scrollbar-thumb {
+  background: rgba(247, 241, 232, 0.22);
+  border-radius: 3px;
+}
+
+.chat-row {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.34;
+  color: var(--cloud-white);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 3px rgba(18, 9, 28, 0.75), 0 0 2px rgba(18, 9, 28, 0.5);
+  animation: chat-row-in 180ms ease;
+}
+@keyframes chat-row-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: none; }
+}
+.chat-row .nm {
+  font-weight: 700;
+  margin-right: 6px;
+}
+.chat-row .ic { margin-right: 5px; }
+.chat-row.k-build,
+.chat-row.k-note { color: rgba(247, 241, 232, 0.92); }
+.chat-row.k-build .tx,
+.chat-row.k-note .tx { color: rgba(247, 241, 232, 0.78); }
+.chat-row.k-join,
+.chat-row.k-leave {
+  font-style: italic;
+  font-size: 13px;
+  color: rgba(247, 241, 232, 0.5);
+}
+.chat-row.k-action {
+  font-style: italic;
+  color: rgba(247, 241, 232, 0.82);
+}
+.chat-row.k-sys {
+  font-size: 13px;
+  text-align: center;
+  color: rgba(255, 224, 140, 0.85);
+}
+/* a tiny report affordance, revealed on row hover (desktop) */
+.chat-row .rep {
+  margin-left: 6px;
+  font-size: 11px;
+  color: rgba(247, 241, 232, 0.4);
+  opacity: 0;
+  pointer-events: auto;
+  transition: opacity 120ms ease;
+}
+.chat-row:hover .rep { opacity: 1; }
+.chat-row .rep:hover { color: var(--terracotta); }
+
+/* ── the composer ── */
+#chat-compose {
+  position: relative;
+  padding: var(--space-1) var(--space-2) 0;
+  pointer-events: auto;
+}
+
+#chat-inputrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 4px 8px;
+  background: rgba(28, 16, 42, 0.55);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition: border-color 150ms ease;
+}
+#chat-inputrow:focus-within { border-color: rgba(255, 255, 255, 0.4); }
+
+#chat-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
   font-family: var(--font-ui);
   font-weight: 600;
   font-size: 15px;
-  letter-spacing: 0.02em;
   color: var(--cloud-white);
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-s);
-  transition: border-color 150ms ease, background 150ms ease;
+  background: none;
+  border: none;
 }
+#chat-input::placeholder { color: rgba(247, 241, 232, 0.45); }
+#chat-input:focus { outline: none; }
 
-#foundry-model {
+#chat-gear,
+#chat-build {
   flex: 0 0 auto;
-  max-width: 160px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--cloud-white);
+  transition: background 150ms ease, transform 150ms ease, opacity 150ms ease;
+}
+#chat-gear { color: rgba(247, 241, 232, 0.6); }
+#chat-gear:hover { color: var(--cloud-white); background: rgba(255, 255, 255, 0.1); }
+#chat-gear svg { width: 19px; height: 19px; }
+#chat-build {
+  background: var(--honey);
+  color: #5A3A12;
+}
+#chat-build:hover { transform: translateY(-1px); }
+#chat-build:disabled { opacity: 0.45; transform: none; cursor: default; }
+#chat-build svg { width: 18px; height: 18px; }
+#chat-gear.on { color: var(--honey); }
+
+/* model picker — folds out under the composer when ⚙ is tapped */
+#chat-model {
+  margin-top: 6px;
+  width: 100%;
+  height: 38px;
   padding: 0 var(--space-1);
-  /* native select arrow on a dark glass field */
-  color-scheme: dark;
-}
-
-#foundry-model option {
-  color: var(--ink);
-  background: var(--cloud-white);
-}
-
-#foundry-prompt {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 0 var(--space-2);
-}
-
-#foundry-prompt::placeholder {
-  color: rgba(247, 241, 232, 0.45);
-}
-
-#foundry-model:focus,
-#foundry-prompt:focus {
-  outline: none;
-  border-color: rgba(255, 255, 255, 0.45);
-  background: rgba(255, 255, 255, 0.14);
-}
-
-#foundry-build {
-  flex: 0 0 auto;
-  min-width: 88px;
-  height: 44px;
-  white-space: nowrap;
-}
-
-#foundry-model:disabled,
-#foundry-prompt:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-#foundry-status {
-  margin-top: 0;
-  max-height: 0;
-  overflow: hidden;
+  font-family: var(--font-ui);
   font-weight: 600;
   font-size: 13px;
-  letter-spacing: 0.02em;
-  text-align: center;
-  color: rgba(247, 241, 232, 0.82);
-  transition: max-height 200ms ease, margin-top 200ms ease;
+  color: var(--cloud-white);
+  background: rgba(28, 16, 42, 0.7);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-s);
+  color-scheme: dark;
+}
+#chat-model option { color: var(--ink); background: var(--cloud-white); }
+
+/* slash-command autocomplete — floats above the input */
+#chat-ac {
+  position: absolute;
+  left: var(--space-2);
+  right: var(--space-2);
+  bottom: calc(100% - var(--space-1));
+  margin-bottom: 6px;
+  padding: 4px;
+  background: rgba(28, 16, 42, 0.92);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow-deep);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.chat-ac-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 6px;
+  text-align: left;
+  font-family: var(--font-ui);
+}
+.chat-ac-item:hover,
+.chat-ac-item.sel { background: rgba(255, 255, 255, 0.12); }
+.chat-ac-item .cmd { font-weight: 700; color: var(--honey); }
+.chat-ac-item .hint { font-size: 12px; color: rgba(247, 241, 232, 0.6); }
+
+/* the soft "build it?" chip for "build me a …" phrasing */
+#chat-suggest {
+  display: block;
+  margin: 0 0 6px;
+  padding: 7px 12px;
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 13px;
+  color: #5A3A12;
+  background: var(--honey);
+  border-radius: var(--radius-pill);
+  box-shadow: 0 6px 16px rgba(24, 14, 38, 0.4);
+  animation: chat-row-in 180ms ease;
 }
 
-#foundry-status.show {
-  margin-top: var(--space-1);
-  max-height: 48px;
-}
-
-/* On a wide screen the whisper chat is a translucent panel docked to the right
-   edge, vertically — a quiet sidebar, the build is the show. (Phones keep the
-   bottom-sheet layout above.) */
-@media (min-width: 760px) {
-  #foundry-chat {
-    left: auto;
-    right: calc(var(--space-2) + env(safe-area-inset-right, 0px));
-    bottom: auto;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 264px;
-    background: rgba(43, 29, 58, 0.42);
-    animation: panel-in 240ms cubic-bezier(0.34, 1.3, 0.64, 1);
-  }
-
-  #foundry-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  #foundry-model,
-  #foundry-prompt,
-  #foundry-build {
-    width: 100%;
-    max-width: none;
-  }
-}
-
-@keyframes panel-in {
-  from { opacity: 0; transform: translate(16px, -50%); }
-  to { opacity: 1; transform: translate(0, -50%); }
-}
-
-/* The whisper chat hides while another mode owns the screen. */
-body.photo-mode #foundry-chat {
+.chat-unread {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--honey);
+  box-shadow: 0 0 0 2px rgba(43, 29, 58, 0.6);
   display: none;
+}
+#btn-chat { position: relative; }
+#btn-chat.has-unread .chat-unread { display: block; }
+
+#chat-ac.hidden,
+#chat-suggest.hidden,
+#chat-model.hidden { display: none; }
+
+/* ── desktop: collapse the rail to a tab ── */
+@media (min-width: 760px) {
+  body:not(.chat-expanded) #chat {
+    pointer-events: none;
+    background: none;
+  }
+  body:not(.chat-expanded) #chat-head,
+  body:not(.chat-expanded) #chat-feed,
+  body:not(.chat-expanded) #chat-compose { display: none; }
+  body:not(.chat-expanded) #chat-tab { display: grid; }
+
+  /* when the rail is open, slide the action buttons clear of it and
+     re-center the palette in the remaining width */
+  body.chat-expanded #actions { right: calc(340px + var(--space-2)); }
+  body.chat-expanded #palette {
+    left: calc((100% - 340px) / 2);
+  }
+}
+
+/* ── phones: a peek above play that taps open to a sheet ── */
+@media (max-width: 759px) {
+  #chat {
+    left: 0;
+    right: 0;
+    width: auto;
+    top: calc(86px + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    height: 96px;                /* ~3 lines of peek */
+    background: none;
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 70%, transparent 100%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 70%, transparent 100%);
+  }
+  /* peek mode: feed only, non-interactive, composer + head hidden */
+  body:not(.chat-expanded) #chat { pointer-events: none; }
+  body:not(.chat-expanded) #chat-head,
+  body:not(.chat-expanded) #chat-compose { display: none; }
+  body:not(.chat-expanded) #chat-feed { pointer-events: none; padding-left: var(--space-2); }
+  body:not(.chat-expanded) .chat-row .rep { display: none; }
+
+  /* expanded mode: a bottom sheet that rides above the keyboard */
+  body.chat-expanded #chat {
+    top: auto;
+    bottom: 0;
+    height: 62svh;
+    max-height: 62svh;
+    padding-top: var(--space-1);
+    background: linear-gradient(to bottom,
+      rgba(43, 29, 58, 0) 0%,
+      rgba(40, 25, 56, 0.5) 24%,
+      rgba(30, 18, 46, 0.86) 100%);
+    -webkit-mask-image: none;
+    mask-image: none;
+    pointer-events: auto;
+  }
+  body.chat-expanded #chat-feed {
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 12%);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 12%);
+  }
+  #chat-tab { display: none !important; }   /* phones use the 💬 action button */
+
+  /* the peek must never sit under the action buttons / prompt pill */
+  body.chat-expanded #actions,
+  body.chat-expanded #palette { opacity: 0; pointer-events: none; }
+}
+
+/* live chat hides while another mode owns the screen. */
+body.photo-mode #chat { display: none; }
+
+/* ── Sky mode: build in the air ────────────────────────────────────────── */
+#btn-sky.active,
+#btn-music.lofi {
+  background: var(--honey);
+  color: #5A3A12;
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+/* the build-height control — a slim pill above the palette, only in sky mode */
+#sky-bar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 28;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 5px 8px;
+  pointer-events: auto;
+  background: rgba(43, 29, 58, 0.5);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-deep);
+  animation: chat-row-in 200ms ease;
+}
+#sky-bar.hidden { display: none; }
+#sky-down,
+#sky-up {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  color: var(--cloud-white);
+  background: rgba(255, 255, 255, 0.1);
+  transition: background 150ms ease, transform 150ms ease;
+}
+#sky-down:hover,
+#sky-up:hover { background: rgba(255, 255, 255, 0.2); transform: translateY(-1px); }
+#sky-down svg,
+#sky-up svg { width: 20px; height: 20px; }
+#sky-readout {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 56px;
+  justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 17px;
+  letter-spacing: 0.02em;
+  color: var(--cloud-white);
+}
+#sky-readout .sky-arrow { color: var(--honey); font-size: 15px; }
+
+/* keep the sky bar clear of the right-rail chat on desktop */
+@media (min-width: 760px) {
+  body.chat-expanded #sky-bar { left: calc((100% - 340px) / 2); }
+}
+
+/* ── Brush size picker (rides the palette row) ─────────────────────────── */
+.brush-pick {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  margin-left: 4px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-s);
+  color: rgba(247, 241, 232, 0.82);
+  background: rgba(43, 29, 58, 0.42);
+  border: 1px solid var(--glass-border);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+  transition: transform 150ms ease, background 150ms ease, color 150ms ease;
+}
+.brush-pick:first-of-type { margin-left: var(--space-2); }
+.brush-pick:hover { background: rgba(255, 255, 255, 0.16); color: var(--cloud-white); }
+.brush-pick.selected {
+  background: var(--honey);
+  color: #5A3A12;
+  transform: translateY(-3px);
+  box-shadow: 0 6px 14px rgba(24, 14, 38, 0.35);
+}
+.brush-pick .dots {
+  display: grid;
+  gap: 1.5px;
+}
+.brush-pick .dots i {
+  width: 3.5px;
+  height: 3.5px;
+  border-radius: 1px;
+  background: currentColor;
+  display: block;
+}
+@media (max-width: 500px) {
+  #sky-bar { bottom: calc(140px + env(safe-area-inset-bottom, 0px)); }
 }
 
 /* ── Filming: vertical letterbox + chrome ──────────────────────────────── */

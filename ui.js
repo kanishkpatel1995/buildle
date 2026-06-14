@@ -37,13 +37,195 @@ let overlayHelp, overlayNote, overlayComposer, overlayCtxlost;
 let shareMenuEl, viewsMenuEl, photoExitEl, filmingEl;
 let voyageCardEl, voyageNameEl, voyageEpithetEl, voyageSailEl, voyageStayEl;
 let arrivalEl, arrivalNameEl, arrivalEpithetEl;
-let foundryChatEl, foundryModelEl, foundryPromptEl, foundryBuildEl, foundryStatusEl;
 let voyageOnSail = null;
 let voyageOnStay = null;
-let foundryOnBuild = null;
-let foundryBusy = false;
 let arrivalTimer = 0;
+
+// ── the Commons (live chat) ──────────────────────────────────────────────
+let chatEl, chatFeedEl, chatInputEl, chatBuildEl, chatGearEl, chatModelEl;
+let chatAcEl, chatSuggestEl, chatCountEl, chatUnreadEl;
+let chatOnSend = null, chatOnBuild = null, chatOnReport = null, chatOnExpand = null;
+let chatExpanded = false;
+let chatBuildBusy = false;
+let chatPlaceholderTimer = 0;
+let chatPlaceholderIdx = 0;
+let chatSuggestTimer = 0;
+const CHAT_ROWS_MAX = 90;           // DOM rows kept; older ones are pruned
+const CHAT_NAME_MAX = 16;
+
+// Distinct, warm-but-readable hues for name colouring (hashed per sender id).
+const CHAT_NAME_COLORS = [
+  '#EBB44E', '#D98E73', '#E5A0B0', '#C79BE0', '#8FB8E8', '#6FD0C2',
+  '#8FD08A', '#D7C56A', '#F0A878', '#B5C98E', '#E89BC4', '#7FC8E0',
+];
+// Rotating ghost-text that teaches /build without a tutorial.
+const CHAT_PLACEHOLDERS = [
+  'say something…', '/build a cherry blossom tree', 'say hi 🌅',
+  '/build a tiny lighthouse', 'roast my build…', '/build a floating island',
+];
+const CHAT_COMMANDS = [
+  { cmd: '/build', hint: 'make something with AI' },
+  { cmd: '/me', hint: 'do an action' },
+  { cmd: '/clear', hint: 'clear your view' },
+];
+// "build me a …", "can you make an …" — the soft fallback to a real /build.
+const CHAT_SOFT_BUILD =
+  /^(?:can (?:you|someone|we) )?(?:please )?(?:build|make|create) (?:me |us )?(?:a |an |the |some )?(.+?)[?.!]*$/i;
+
+function djb2(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h >>> 0;
+}
+function chatNameColor(id) {
+  return CHAT_NAME_COLORS[djb2(String(id || 'x')) % CHAT_NAME_COLORS.length];
+}
+
+function makeReportBtn() {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'rep';
+  b.title = 'report';
+  b.setAttribute('aria-label', 'report message');
+  b.textContent = '⚑';
+  return b;
+}
+
+// One feed row. Styling + structure vary by kind; user content (chat/action)
+// gets a report affordance, system lines never do.
+function buildChatRow(msg, noAnim) {
+  const kind = msg.kind || 'chat';
+  const row = document.createElement('div');
+  row.className = 'chat-row k-' + kind;
+  if (msg.mid) row.dataset.mid = msg.mid;
+  if (noAnim) row.style.animation = 'none';
+  const name = String(msg.name || '').slice(0, CHAT_NAME_MAX);
+  const text = String(msg.text || '');
+  const nameSpan = (fallback) => {
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.style.color = chatNameColor(msg.id || name);
+    nm.textContent = name || fallback;
+    return nm;
+  };
+  const textSpan = (t) => {
+    const tx = document.createElement('span');
+    tx.className = 'tx';
+    tx.textContent = t;
+    return tx;
+  };
+  const icon = (ch) => {
+    const ic = document.createElement('span');
+    ic.className = 'ic';
+    ic.textContent = ch;
+    return ic;
+  };
+  if (kind === 'chat') {
+    row.append(nameSpan('wanderer'), textSpan(text), makeReportBtn());
+  } else if (kind === 'action') {
+    row.append(textSpan(`${name || 'someone'} ${text}`), makeReportBtn());
+  } else if (kind === 'build') {
+    row.append(icon('🔨'), nameSpan('a wanderer'), textSpan(text));
+  } else if (kind === 'note') {
+    row.append(icon('📌'), nameSpan('a wanderer'), textSpan(text));
+  } else if (kind === 'join' || kind === 'leave') {
+    row.append(textSpan(`${name || 'a wanderer'} ${text || (kind === 'join' ? 'wandered in' : 'drifted off')}`));
+  } else {
+    row.append(textSpan(text));   // sys
+  }
+  return row;
+}
+
+function scrollChatToEnd() {
+  if (chatFeedEl) chatFeedEl.scrollTop = chatFeedEl.scrollHeight;
+}
+
+function markChatUnread() {
+  const b = $('btn-chat');
+  if (b) b.classList.add('has-unread');
+}
+function clearChatUnread() {
+  const b = $('btn-chat');
+  if (b) b.classList.remove('has-unread');
+}
+
+// Slash-command autocomplete, filtered by the typed prefix.
+function showChatAc(prefix) {
+  if (!chatAcEl) return;
+  const p = String(prefix || '').toLowerCase();
+  const items = CHAT_COMMANDS.filter((c) => c.cmd.startsWith(p));
+  if (!items.length) { hideChatAc(); return; }
+  chatAcEl.replaceChildren(...items.map((c) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chat-ac-item';
+    const cmd = document.createElement('span'); cmd.className = 'cmd'; cmd.textContent = c.cmd;
+    const hint = document.createElement('span'); hint.className = 'hint'; hint.textContent = c.hint;
+    b.append(cmd, hint);
+    b.addEventListener('mousedown', (e) => e.preventDefault());   // keep input focus
+    b.addEventListener('click', () => {
+      chatInputEl.value = c.cmd + ' ';
+      chatInputEl.focus();
+      hideChatAc();
+    });
+    return b;
+  }));
+  chatAcEl.classList.remove('hidden');
+}
+function hideChatAc() {
+  if (chatAcEl) chatAcEl.classList.add('hidden');
+}
+
+function showChatSuggest(subject) {
+  if (!chatSuggestEl) return;
+  chatSuggestEl.dataset.subject = subject;
+  chatSuggestEl.textContent = `🔨 build “${subject}”?`;
+  chatSuggestEl.classList.remove('hidden');
+  clearTimeout(chatSuggestTimer);
+  chatSuggestTimer = setTimeout(hideChatSuggest, 12000);
+}
+function hideChatSuggest() {
+  if (chatSuggestEl) chatSuggestEl.classList.add('hidden');
+  clearTimeout(chatSuggestTimer);
+  chatSuggestTimer = 0;
+}
+
+function startChatPlaceholder() {
+  stopChatPlaceholder();
+  chatPlaceholderTimer = setInterval(() => {
+    if (!chatInputEl || document.activeElement === chatInputEl || chatInputEl.value) return;
+    chatPlaceholderIdx = (chatPlaceholderIdx + 1) % CHAT_PLACEHOLDERS.length;
+    chatInputEl.placeholder = CHAT_PLACEHOLDERS[chatPlaceholderIdx];
+  }, 4200);
+}
+function stopChatPlaceholder() {
+  clearInterval(chatPlaceholderTimer);
+  chatPlaceholderTimer = 0;
+}
+function restoreChatPlaceholder() {
+  if (!chatInputEl) return;
+  chatInputEl.placeholder = document.activeElement === chatInputEl
+    ? 'say something… or /build'
+    : CHAT_PLACEHOLDERS[chatPlaceholderIdx];
+}
+
+// Keep the expanded sheet's composer above the on-screen keyboard (phones).
+function syncChatViewport() {
+  if (!chatEl || !window.visualViewport) return;
+  if (!chatExpanded || !matchMedia('(max-width: 759px)').matches) {
+    chatEl.style.bottom = '';
+    return;
+  }
+  const vv = window.visualViewport;
+  const overlap = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
+  chatEl.style.bottom = overlap + 'px';
+}
+
+function cssEscape(s) {
+  return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\\]]/g, '\\$&');
+}
 let swatchEls = [];
+let brushEls = [];
 let messageSlotEl = null;
 let openMenuCleanup = null;
 
@@ -216,7 +398,7 @@ function drawCardOverlay(ctx, { day, prompt, name, streak }) {
 // ── Public API ──────────────────────────────────────────────────────────
 
 export const ui = {
-  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView, onWhisper }) {
+  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView, onChat, onSky, onBuildY, onBrush, onMusicMode }) {
     promptTextEl = $('prompt-text');
     dayLineEl = $('day-line');
     paletteEl = $('palette');
@@ -281,6 +463,24 @@ export const ui = {
     });
     paletteEl.appendChild(messageSlotEl);
 
+    // Brush size — single / 2×2×2 / 3×3 blob, for clouds and big masses. Rides
+    // the end of the palette row (scrolls with it on phones).
+    brushEls = [1, 2, 3].map((n) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'brush-pick';
+      b.title = n === 1 ? 'single block' : `${n}×${n} brush`;
+      b.setAttribute('aria-label', b.title);
+      const dots = document.createElement('span');
+      dots.className = 'dots';
+      dots.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+      for (let i = 0; i < n * n; i++) dots.appendChild(document.createElement('i'));
+      b.appendChild(dots);
+      b.addEventListener('click', () => { ui.selectBrush(n); if (onBrush) onBrush(n); });
+      paletteEl.appendChild(b);
+      return b;
+    });
+
     $('btn-share').addEventListener('click', onShare);
     soundBtn.addEventListener('click', () => {
       onToggleSound();
@@ -292,7 +492,13 @@ export const ui = {
     if (onViews) $('btn-views').addEventListener('click', onViews);
     if (onCompass) $('btn-compass').addEventListener('click', onCompass);
     if (onExitView) photoExitEl.addEventListener('click', onExitView);
-    if (onWhisper) $('btn-whisper').addEventListener('click', onWhisper);
+    if (onChat) $('btn-chat').addEventListener('click', onChat);
+    if (onSky) $('btn-sky').addEventListener('click', onSky);
+    if (onBuildY) {
+      $('sky-up').addEventListener('click', () => onBuildY(1));
+      $('sky-down').addEventListener('click', () => onBuildY(-1));
+    }
+    if (onMusicMode) $('btn-music').addEventListener('click', onMusicMode);
 
     // The mobile palette scrolls; a right-edge fade signals the clipped run
     // and lifts once the user reaches the end.
@@ -318,6 +524,28 @@ export const ui = {
 
   selectSwatch(i) {
     applySelection(i);
+  },
+
+  selectBrush(n) {
+    brushEls.forEach((el, i) => el.classList.toggle('selected', i + 1 === n));
+  },
+
+  setSkyActive(b) {
+    $('btn-sky').classList.toggle('active', !!b);
+    $('sky-bar').classList.toggle('hidden', !b);
+  },
+
+  setBuildY(y) {
+    const el = $('sky-y');
+    if (el) el.textContent = String(y | 0);
+  },
+
+  setMusicMode(mode) {
+    const b = $('btn-music');
+    if (!b) return;
+    const lofi = mode === 'lofi';
+    b.classList.toggle('lofi', lofi);
+    b.title = lofi ? 'lo-fi beats — tap for golden-hour ambient' : 'golden-hour ambient — tap for lo-fi beats';
   },
 
   setMessageUsed(used) {
@@ -478,68 +706,209 @@ export const ui = {
     arrivalTimer = setTimeout(() => arrivalEl.classList.remove('go'), ARRIVAL_MS);
   },
 
-  // ── the foundry (agent chat) ────────────────────────────────────────────
+  // ── the Commons (live chat: talk + /build) ───────────────────────────────
 
-  initFoundry({ models, onBuild }) {
-    const firstInit = !foundryChatEl;
-    foundryChatEl = $('foundry-chat');
-    foundryModelEl = $('foundry-model');
-    foundryPromptEl = $('foundry-prompt');
-    foundryBuildEl = $('foundry-build');
-    foundryStatusEl = $('foundry-status');
-    foundryOnBuild = onBuild;
+  initChat({ models, expanded, onSend, onBuild, onReport, onExpand }) {
+    chatEl = $('chat');
+    chatFeedEl = $('chat-feed');
+    chatInputEl = $('chat-input');
+    chatBuildEl = $('chat-build');
+    chatGearEl = $('chat-gear');
+    chatModelEl = $('chat-model');
+    chatAcEl = $('chat-ac');
+    chatSuggestEl = $('chat-suggest');
+    chatCountEl = $('chat-count');
+    chatUnreadEl = $('chat-unread');
+    chatOnSend = onSend;
+    chatOnBuild = onBuild;
+    chatOnReport = onReport;
+    chatOnExpand = onExpand;
 
-    foundryModelEl.replaceChildren(...(models || []).map(({ id, label, blurb }) => {
+    chatModelEl.replaceChildren(...(models || []).map(({ id, label, blurb }) => {
       const opt = document.createElement('option');
       opt.value = id;
       opt.textContent = blurb ? `${label} — ${blurb}` : label;
       return opt;
     }));
 
-    // Bind once: the submit closure reads the live module-level state
-    // (foundryOnBuild/foundryBusy), so re-init never needs new listeners.
-    if (firstInit) {
-      const submit = () => {
-        if (foundryBusy) return;
-        const prompt = foundryPromptEl.value.trim();
-        if (!prompt) return;
-        audio.ui();
-        if (foundryOnBuild) foundryOnBuild(foundryModelEl.value, prompt);
-      };
-      foundryBuildEl.addEventListener('click', submit);
-      foundryPromptEl.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          submit();
+    // ── submit: one input that chats AND builds ──
+    const doBuild = (prompt) => {
+      if (!prompt) return;
+      if (chatBuildBusy) { ui.chatSys('still building — one at a time'); return; }
+      audio.ui();
+      if (chatOnBuild) chatOnBuild(chatModelEl.value, prompt);
+    };
+    const submit = () => {
+      const raw = chatInputEl.value.trim();
+      hideChatAc();
+      hideChatSuggest();
+      if (!raw) return;
+      if (raw === '/clear') { ui.chatReset(); chatInputEl.value = ''; return; }
+      if (/^\/build\b/i.test(raw)) {
+        const p = raw.replace(/^\/build\b\s*/i, '').trim();
+        if (p) { doBuild(p); chatInputEl.value = ''; restoreChatPlaceholder(); }
+        else { chatInputEl.value = '/build '; showChatAc('/build'); }
+        return;
+      }
+      if (/^\/me\b/i.test(raw)) {
+        const a = raw.replace(/^\/me\b\s*/i, '').trim();
+        if (a && chatOnSend) chatOnSend(a, 'action');
+        chatInputEl.value = '';
+        restoreChatPlaceholder();
+        return;
+      }
+      // plain chat
+      audio.ui();
+      if (chatOnSend) chatOnSend(raw, 'chat');
+      chatInputEl.value = '';
+      restoreChatPlaceholder();
+      // soft "build it?" offer for build-y phrasing
+      const m = raw.match(CHAT_SOFT_BUILD);
+      if (m && m[1] && m[1].trim().length >= 2 && m[1].trim().length <= 80) {
+        showChatSuggest(m[1].trim());
+      }
+    };
+
+    chatInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); submit(); return; }
+      if (e.key === 'Escape') { hideChatAc(); chatInputEl.blur(); }
+    });
+    chatInputEl.addEventListener('input', () => {
+      const v = chatInputEl.value;
+      if (v.startsWith('/') && !/\s/.test(v)) showChatAc(v);
+      else hideChatAc();
+      if (v) hideChatSuggest();
+    });
+    chatInputEl.addEventListener('focus', () => {
+      stopChatPlaceholder();
+      chatInputEl.placeholder = 'say something… or /build';
+    });
+    chatInputEl.addEventListener('blur', () => {
+      setTimeout(hideChatAc, 120);
+      if (!chatInputEl.value) startChatPlaceholder();
+    });
+
+    chatBuildEl.addEventListener('click', () => {
+      const raw = chatInputEl.value.trim();
+      if (raw && !/^\/(me|clear)\b/i.test(raw)) {
+        const p = raw.replace(/^\/build\b\s*/i, '').trim();
+        if (p) { doBuild(p); chatInputEl.value = ''; restoreChatPlaceholder(); return; }
+      }
+      chatInputEl.value = '/build ';
+      chatInputEl.focus();
+      showChatAc('/build');
+    });
+
+    chatGearEl.addEventListener('click', () => {
+      const open = chatModelEl.classList.toggle('hidden') === false;
+      chatGearEl.classList.toggle('on', open);
+      audio.ui();
+    });
+
+    chatSuggestEl.addEventListener('click', () => {
+      const subject = chatSuggestEl.dataset.subject || '';
+      hideChatSuggest();
+      doBuild(subject);
+    });
+
+    // collapse / reopen / peek-to-expand all route through toggleChat
+    $('chat-collapse').addEventListener('click', () => ui.toggleChat(false));
+    $('chat-tab').addEventListener('click', () => ui.toggleChat(true));
+    chatFeedEl.addEventListener('click', (e) => {
+      const rep = e.target.closest('.rep');
+      if (rep) {
+        const row = rep.closest('.chat-row');
+        if (row && row.dataset.mid && chatOnReport) {
+          chatOnReport(row.dataset.mid);
+          row.classList.add('reported');
+          rep.textContent = 'reported';
         }
-      });
+        return;
+      }
+      // tapping the peek (phones, collapsed) opens the sheet
+      if (!chatExpanded) ui.toggleChat(true);
+    });
+
+    // keep the composer above the on-screen keyboard (phones)
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', syncChatViewport);
+      window.visualViewport.addEventListener('scroll', syncChatViewport);
     }
+
+    chatExpanded = !!expanded;
+    document.body.classList.toggle('chat-expanded', chatExpanded);
+    if (!chatExpanded) startChatPlaceholder();
   },
 
-  showFoundry(visible) {
-    if (visible) {
-      show(foundryChatEl);
-    } else {
-      hide(foundryChatEl);
-      ui.setFoundryStatus('');
+  // Toggle the rail open/closed (desktop) or the sheet/peek (phones).
+  toggleChat(force) {
+    const next = typeof force === 'boolean' ? force : !chatExpanded;
+    if (next === chatExpanded) { if (next) chatInputEl && chatInputEl.focus(); return; }
+    chatExpanded = next;
+    document.body.classList.toggle('chat-expanded', chatExpanded);
+    audio.ui();
+    if (chatExpanded) {
+      clearChatUnread();
+      // focus to chat (opens the keyboard on phones — that's the intent here)
+      if (chatInputEl) requestAnimationFrame(() => chatInputEl.focus({ preventScroll: true }));
+      scrollChatToEnd();
+    } else if (chatInputEl) {
+      chatInputEl.blur();
     }
+    if (chatOnExpand) chatOnExpand(chatExpanded);
+    return chatExpanded;
   },
 
-  setFoundryStatus(text) {
-    foundryStatusEl.textContent = text || '';
-    foundryStatusEl.classList.toggle('show', !!text);
+  // Append one message. msg = { mid, id, name, text, kind, ts }.
+  chatPush(msg) {
+    if (!chatFeedEl || !msg) return;
+    const row = buildChatRow(msg);
+    chatFeedEl.appendChild(row);
+    while (chatFeedEl.childElementCount > CHAT_ROWS_MAX) chatFeedEl.firstElementChild.remove();
+    scrollChatToEnd();
+    if (!chatExpanded && msg.kind !== 'join' && msg.kind !== 'leave') markChatUnread();
   },
 
-  setFoundryBusy(busy) {
-    foundryBusy = !!busy;
-    foundryBuildEl.disabled = foundryBusy;
-    foundryPromptEl.disabled = foundryBusy;
-    foundryModelEl.disabled = foundryBusy;
-    foundryBuildEl.textContent = foundryBusy ? 'building…' : 'build';
+  // Replay a batch (recent history on join) without per-row animation noise.
+  chatLog(msgs) {
+    if (!chatFeedEl) return;
+    chatFeedEl.replaceChildren();
+    if (Array.isArray(msgs)) for (const m of msgs) chatFeedEl.appendChild(buildChatRow(m, true));
+    scrollChatToEnd();
   },
 
-  getFoundryModel() {
-    return foundryModelEl ? foundryModelEl.value : '';
+  chatReset() {
+    if (chatFeedEl) chatFeedEl.replaceChildren();
+  },
+
+  chatHide(mid) {
+    if (!chatFeedEl || !mid) return;
+    const row = chatFeedEl.querySelector(`[data-mid="${cssEscape(mid)}"]`);
+    if (row) row.remove();
+  },
+
+  // A local-only system line (errors, build status). Not sent to the room.
+  chatSys(text) {
+    ui.chatPush({ mid: '', id: '', name: '', text: String(text || ''), kind: 'sys', ts: Date.now() });
+  },
+
+  setChatCount(n) {
+    if (!chatCountEl) return;
+    const c = Math.max(0, n | 0);
+    chatCountEl.textContent = c <= 1 ? 'live' : `${c} here`;
+  },
+
+  setChatBuildBusy(busy) {
+    chatBuildBusy = !!busy;
+    if (chatBuildEl) chatBuildEl.disabled = chatBuildBusy;
+  },
+
+  getChatModel() {
+    return chatModelEl ? chatModelEl.value : '';
+  },
+
+  get chatExpanded() {
+    return chatExpanded;
   },
 
   setPhotoMode(b) {

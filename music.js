@@ -144,6 +144,7 @@ const FELT_VOICE_OPTIONS = {
 
 let isStarted = false;
 let muted = false;
+let suspended = false;     // stepped aside while lo-fi mode owns the soundtrack
 let mobileBudget = false;
 let cfg = null;
 
@@ -502,12 +503,22 @@ export const music = {
     if (!isStarted) return;
     const g = musicBus.gain;
     g.cancelScheduledValues(Tone.now());
-    g.rampTo(muted ? 0 : MUSIC_BUS_GAIN, MUTE_RAMP_S);
+    g.rampTo((muted || suspended) ? 0 : MUSIC_BUS_GAIN, MUTE_RAMP_S);
+  },
+
+  // Step aside (silence the ambient bus) while lo-fi mode plays, without
+  // touching the user's mute preference. Reversible.
+  setSuspended(b) {
+    suspended = !!b;
+    if (!isStarted) return;
+    const g = musicBus.gain;
+    g.cancelScheduledValues(Tone.now());
+    g.rampTo((muted || suspended) ? 0 : MUSIC_BUS_GAIN, MUTE_RAMP_S);
   },
 
   // Quick dip so SFX read clearly over the music, then ease back.
   duck() {
-    if (!isStarted || muted) return;
+    if (!isStarted || muted || suspended) return;
     const g = musicBus.gain;
     const now = Tone.now();
     g.cancelScheduledValues(now);

@@ -50,6 +50,33 @@ const PRESENCE_AV_CAP = 24;      // most-recently-updated avatars carried in `av
 const PRESENCE_NAME_MAX = 16;    // matches NAME_MAX for the shared world
 const PRESENCE_BODY_MAX = 63;    // palette colour index ceiling (generous)
 
+// --- live chat (rides the same per-island presence socket) ---
+const CHAT_MAX = 240;            // chars per line after sanitising
+const CHAT_RING = 50;            // recent lines replayed to a new arrival
+const CHAT_WINDOW_MS = 10000;    // rolling rate-limit window
+const CHAT_BURST = 8;            // most lines allowed inside that window
+const CHAT_GAP_MS = 600;         // floor between two consecutive lines
+const CHAT_NEW_MS = 20000;       // probation window for a brand-new socket
+const CHAT_NEW_MAX = 3;          // lines allowed during probation
+const CHAT_DEDUP_MS = 4000;      // identical line inside this is dropped
+const CHAT_KINDS = new Set(['chat', 'build', 'note', 'action']);
+const CHAT_REPORT_HIDE = 2;      // distinct reporters needed to shadow-hide a line
+// Strip anything that smells like a link (phishing lesson from wplace.live): a
+// scheme, a www., or a bare host.tld[/path]. Replaced with a small placeholder.
+const CHAT_URL_RE =
+  /(?:https?:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\.(?:com|net|org|io|gg|xyz|app|co|me|dev|link|click|live|ru|cn|info|tv|to)\b\S*/gi;
+
+// Collapse whitespace, defang links, clamp length. Returns null when nothing
+// printable survives.
+function sanitizeChat(raw) {
+  if (typeof raw !== 'string') return null;
+  let t = raw.replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  t = t.replace(CHAT_URL_RE, '▢');
+  t = t.slice(0, CHAT_MAX).trim();
+  return t || null;
+}
+
 // Plaza bounds (LOCAL coords): x,z in [-32,31], y in [0,31].
 const MIN_XZ = -32, MAX_XZ = 31, MIN_Y = 0, MAX_Y = 31;
 
@@ -748,6 +775,11 @@ export class PresenceDO {
     // with the 1Hz alarm pending — never hibernates).
     this.peers = new Map();
     this.seq = 0;
+    // Live chat: a small ring of recent lines (replayed to new arrivals), a
+    // monotonic message counter for stable ids, and a report tally per line.
+    this.chatRing = [];
+    this.msgSeq = 0;
+    this.reports = new Map();   // mid -> Set(reporterId)
     // Idle keepalives (ping/pong) are answered without waking the DO.
     try {
       ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
@@ -779,6 +811,8 @@ export class PresenceDO {
           body: Number.isInteger(att.body) ? att.body : 0,
           p: [0, 0, 0], y: 0, a: 0,
           updated: Date.now(),
+          connectedAt: Date.now(), joined: true,   // already here pre-wake
+          chatTimes: [], lastText: '', lastTextTs: 0, lastChatAt: 0,
         });
       } else {
         this.peers.get(id).ws = ws;
@@ -808,6 +842,8 @@ export class PresenceDO {
     this.peers.set(id, {
       ws: server, id, name: FALLBACK_NAME, body: 0,
       p: [0, 0, 0], y: 0, a: 0, updated: Date.now(),
+      connectedAt: Date.now(), joined: false,
+      chatTimes: [], lastText: '', lastTextTs: 0, lastChatAt: 0,
     });
     await this.ensureAlarm();
     return new Response(null, { status: 101, webSocket: client });
@@ -827,6 +863,8 @@ export class PresenceDO {
       name: typeof att.name === 'string' ? att.name : FALLBACK_NAME,
       body: Number.isInteger(att.body) ? att.body : 0,
       p: [0, 0, 0], y: 0, a: 0, updated: Date.now(),
+      connectedAt: Date.now(), joined: true,   // healed an existing socket
+      chatTimes: [], lastText: '', lastTextTs: 0, lastChatAt: 0,
     };
     this.peers.set(id, peer);
     return peer;
@@ -847,9 +885,17 @@ export class PresenceDO {
         ? msg.body : 0;
       peer.updated = Date.now();
       try { ws.serializeAttachment({ id: peer.id, name: peer.name, body: peer.body }); } catch { /* ignore */ }
+      // Replay recent chat to this arrival only, then announce them once.
+      try { ws.send(JSON.stringify({ t: 'log', msgs: this.chatRing })); } catch { /* socket died */ }
+      if (!peer.joined) {
+        peer.joined = true;
+        this.sysLine('join', peer.name, 'wandered in');
+      }
       await this.ensureAlarm();
       return;
     }
+    if (msg.t === 'chat') { this.handleChat(peer, msg); return; }
+    if (msg.t === 'report') { this.handleReport(peer, msg); return; }
     if (msg.t === 'state') {
       const p = msg.p;
       if (Array.isArray(p) && p.length === 3 &&
@@ -867,19 +913,30 @@ export class PresenceDO {
   // Drop a peer and tell the room promptly so others fade it out.
   dropSocket(ws) {
     let goneId = null;
+    let goneName = null;
+    let goneJoined = false;
     for (const [id, peer] of this.peers) {
-      if (peer.ws === ws) { goneId = id; this.peers.delete(id); break; }
+      if (peer.ws === ws) {
+        goneId = id; goneName = peer.name; goneJoined = peer.joined;
+        this.peers.delete(id); break;
+      }
     }
     if (!goneId) {
       let att = null;
       try { att = ws.deserializeAttachment(); } catch { att = null; }
       if (att && typeof att.id === 'string') {
         goneId = att.id;
+        goneName = typeof att.name === 'string' ? att.name : null;
         this.peers.delete(goneId);
       }
     }
     try { ws.close(); } catch { /* already closed */ }
-    if (goneId) this.broadcast(JSON.stringify({ t: 'leave', id: goneId }));
+    if (goneId) {
+      this.broadcast(JSON.stringify({ t: 'leave', id: goneId }));
+      // Only announce a departure for someone who actually said hello (so a
+      // probe socket that opens and closes never spams the feed).
+      if (goneJoined && goneName) this.sysLine('leave', goneName, 'drifted off');
+    }
   }
 
   webSocketClose(ws) {
@@ -899,6 +956,69 @@ export class PresenceDO {
         /* dead socket — the close handler (or the sweep) reaps its peer */
       }
     }
+  }
+
+  // Stamp a chat line with a room-unique id, keep it in the replay ring, and fan
+  // it out to everyone (including the sender, so their own line confirms).
+  emitMsg(peer, text, kind) {
+    const mid = peer.id + '-' + (this.msgSeq++).toString(36);
+    const out = { t: 'msg', mid, id: peer.id, name: peer.name, text, kind, ts: Date.now() };
+    this.chatRing.push(out);
+    if (this.chatRing.length > CHAT_RING) this.chatRing.shift();
+    this.broadcast(JSON.stringify(out));
+  }
+
+  // Ephemeral system lines (join/leave) — broadcast but never kept in the ring,
+  // so a new arrival doesn't replay stale comings and goings.
+  sysLine(kind, name, text) {
+    const out = {
+      t: 'msg', mid: 'sys-' + (this.msgSeq++).toString(36),
+      id: '', name, text, kind, ts: Date.now(),
+    };
+    this.broadcast(JSON.stringify(out));
+  }
+
+  // One inbound chat line. Validated, filtered, rate-limited, then relayed.
+  handleChat(peer, msg) {
+    const kind = CHAT_KINDS.has(msg.kind) ? msg.kind : 'chat';
+    const text = sanitizeChat(msg.text);
+    if (!text) return;
+    const now = Date.now();
+    // identical line, just now → drop (accidental double-send / spam)
+    if (text === peer.lastText && now - peer.lastTextTs < CHAT_DEDUP_MS) return;
+    // floor between lines
+    if (now - peer.lastChatAt < CHAT_GAP_MS) return;
+    // rolling window
+    peer.chatTimes = peer.chatTimes.filter((ts) => now - ts < CHAT_WINDOW_MS);
+    if (peer.chatTimes.length >= CHAT_BURST) return;
+    // brand-new sockets get a stricter cap (drive-by spam guard)
+    if (now - peer.connectedAt < CHAT_NEW_MS && peer.chatTimes.length >= CHAT_NEW_MAX) return;
+    // profanity → shadow-drop: the sender alone gets a gentle nudge, the room
+    // never sees it (applies to chat AND /build prompts, which arrive as text).
+    if (matcher.hasMatch(text)) {
+      try { peer.ws.send(JSON.stringify({ t: 'sys', text: "let's keep it kind" })); } catch { /* gone */ }
+      return;
+    }
+    peer.chatTimes.push(now);
+    peer.lastChatAt = now;
+    peer.lastText = text;
+    peer.lastTextTs = now;
+    this.emitMsg(peer, text, kind);
+  }
+
+  // A peer flags a line; once enough distinct peers agree, hide it for everyone.
+  handleReport(peer, msg) {
+    const mid = typeof msg.mid === 'string' ? msg.mid : '';
+    if (!mid || mid.startsWith('sys-')) return;
+    let set = this.reports.get(mid);
+    if (!set) this.reports.set(mid, (set = new Set()));
+    set.add(peer.id);
+    if (set.size >= CHAT_REPORT_HIDE) {
+      this.chatRing = this.chatRing.filter((m) => m.mid !== mid);  // no replay
+      this.broadcast(JSON.stringify({ t: 'hide', mid }));
+      this.reports.delete(mid);
+    }
+    if (this.reports.size > 500) this.reports.clear();   // unbounded-growth guard
   }
 
   async alarm() {

@@ -61,10 +61,17 @@
           <polygon points="13.22 6.78 11.61 11.61 6.78 13.22 8.39 8.39" fill="currentColor" stroke="none" />
         </svg>
       </button>
-      <button id="btn-whisper" class="round-btn" type="button" title="build with ai" aria-label="build with ai">
-        <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-          <path d="M10 2.2 11.3 7 16 8.3 11.3 9.6 10 14.4 8.7 9.6 4 8.3 8.7 7Z" />
-          <path d="M15.4 12.2 16 14.2 18 14.8 16 15.4 15.4 17.4 14.8 15.4 12.8 14.8 14.8 14.2Z" />
+      <button id="btn-chat" class="round-btn" type="button" title="live chat — talk &amp; build" aria-label="live chat">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3.4 5.6A1.6 1.6 0 0 1 5 4h10a1.6 1.6 0 0 1 1.6 1.6v5.6A1.6 1.6 0 0 1 15 12.8H8.2L4.8 15.6v-2.8H5a1.6 1.6 0 0 1-1.6-1.6Z" />
+          <path d="M6.6 7.4h6.8M6.6 9.8h4.2" />
+        </svg>
+        <span id="chat-unread" class="chat-unread" aria-hidden="true"></span>
+      </button>
+      <button id="btn-sky" class="round-btn" type="button" title="sky mode — build in the air" aria-label="sky mode">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6.2 14.4a3.3 3.3 0 0 1-.5-6.56 4.1 4.1 0 0 1 7.94-1.16 2.9 2.9 0 0 1 .56 5.74" />
+          <path d="M10 16.2v-5M8 13l2-2 2 2" fill="none" />
         </svg>
       </button>
       <button id="btn-sound" class="round-btn" type="button" title="sound" aria-label="toggle sound">
@@ -79,6 +86,13 @@
           <path d="m17 8.2-3.8 3.8" />
         </svg>
       </button>
+      <button id="btn-music" class="round-btn" type="button" title="lo-fi beats to build to" aria-label="music mode">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M8 14.2V5l7-1.6v9" />
+          <circle cx="6" cy="14.4" r="2" fill="currentColor" stroke="none" />
+          <circle cx="13" cy="12.4" r="2" fill="currentColor" stroke="none" />
+        </svg>
+      </button>
       <button id="btn-help" class="round-btn" type="button" title="help" aria-label="help">
         <span class="qmark" aria-hidden="true">?</span>
       </button>
@@ -87,18 +101,58 @@
 
   <div id="joystick" aria-hidden="true"><div id="joystick-knob"></div></div>
 
+  <!-- Sky mode height control — shown only while building in the air. -->
+  <div id="sky-bar" class="hidden" role="group" aria-label="build height">
+    <button id="sky-down" type="button" aria-label="lower the build plane">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8l5 5 5-5" /></svg>
+    </button>
+    <div id="sky-readout"><span class="sky-arrow" aria-hidden="true">↕</span><span id="sky-y">6</span></div>
+    <button id="sky-up" type="button" aria-label="raise the build plane">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5-5 5 5" /></svg>
+    </button>
+  </div>
+
   <div id="share-menu" class="mini-menu hidden" role="menu" aria-label="share"></div>
   <div id="views-menu" class="mini-menu hidden" role="menu" aria-label="camera views"></div>
 
-  <div id="foundry-chat" class="hidden" role="form" aria-label="the foundry">
-    <div id="foundry-title">the foundry</div>
-    <div id="foundry-row">
-      <select id="foundry-model" aria-label="model"></select>
-      <input id="foundry-prompt" type="text" maxlength="200" autocomplete="off"
-             autocapitalize="off" spellcheck="false" placeholder="what should we build?" />
-      <button id="foundry-build" class="button-primary" type="button">build</button>
+  <!-- The Commons: one live chat. Talk to the island, or type /build to make
+       something. Rides the per-island presence socket. -->
+  <div id="chat" aria-label="island chat">
+    <button id="chat-tab" type="button" aria-label="show chat" title="show chat">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3.4 5.6A1.6 1.6 0 0 1 5 4h10a1.6 1.6 0 0 1 1.6 1.6v5.6A1.6 1.6 0 0 1 15 12.8H8.2L4.8 15.6v-2.8H5a1.6 1.6 0 0 1-1.6-1.6Z" />
+      </svg>
+    </button>
+    <div id="chat-head">
+      <span id="chat-count" class="chat-count">live</span>
+      <button id="chat-collapse" type="button" aria-label="hide chat" title="hide chat">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M7.5 4.5 13 10l-5.5 5.5" />
+        </svg>
+      </button>
     </div>
-    <div id="foundry-status" role="status" aria-live="polite"></div>
+    <div id="chat-feed" role="log" aria-live="polite" aria-label="chat messages"></div>
+    <div id="chat-compose">
+      <div id="chat-ac" class="hidden" role="listbox" aria-label="commands"></div>
+      <button id="chat-suggest" class="hidden" type="button"></button>
+      <div id="chat-inputrow">
+        <button id="chat-gear" type="button" aria-label="choose builder" title="choose the AI builder">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.4" />
+            <path d="M10 2.6v2.2M10 15.2v2.2M2.6 10h2.2M15.2 10h2.2M4.8 4.8l1.6 1.6M13.6 13.6l1.6 1.6M15.2 4.8l-1.6 1.6M6.4 13.6l-1.6 1.6" />
+          </svg>
+        </button>
+        <input id="chat-input" type="text" maxlength="240" autocomplete="off"
+               autocapitalize="sentences" spellcheck="false" placeholder="say something…" />
+        <button id="chat-build" type="button" aria-label="build with AI" title="build with AI">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M11.6 3.2 8 6.8l-1.2-1.2-3 3a1.4 1.4 0 0 0 0 2l1.6 1.6a1.4 1.4 0 0 0 2 0l3-3L9.2 8l3.6-3.6Z" />
+            <path d="m12 8 4.4 4.4a1.6 1.6 0 0 1-2.3 2.3L9.8 10.2" />
+          </svg>
+        </button>
+      </div>
+      <select id="chat-model" class="hidden" aria-label="builder model"></select>
+    </div>
   </div>
 
   <div id="tilt-top" class="tilt-band" aria-hidden="true"></div>

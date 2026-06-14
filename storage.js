@@ -13,6 +13,7 @@ const PLAYER_DEFAULTS = {
   muted: false,
   helpSeen: false,
   bodyColor: -1,
+  musicMode: 'ambient',     // 'ambient' (golden-hour) | 'lofi' (beats to build to)
 };
 
 function probeStorage() {
@@ -81,6 +82,7 @@ export function loadPlayer() {
   if (typeof player.name !== 'string') player.name = PLAYER_DEFAULTS.name;
   player.muted = Boolean(player.muted);
   player.helpSeen = Boolean(player.helpSeen);
+  if (player.musicMode !== 'lofi') player.musicMode = 'ambient';
   return player;
 }
 

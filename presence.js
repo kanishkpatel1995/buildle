@@ -189,6 +189,24 @@ export function createPresence({ scene, reducedMotion = false }) {
     if (!msg || typeof msg !== 'object') return;
     if (msg.t === 'world') applyRoster(msg);
     else if (msg.t === 'leave') beginLeave(msg.id);
+    // ── live chat (rides the same socket) ──
+    else if (msg.t === 'msg') { if (api.onChat) api.onChat(msg); }
+    else if (msg.t === 'log') { if (api.onChatLog) api.onChatLog(Array.isArray(msg.msgs) ? msg.msgs : []); }
+    else if (msg.t === 'hide') { if (api.onChatHide) api.onChatHide(msg.mid); }
+    else if (msg.t === 'sys') { if (api.onChatSys) api.onChatSys(msg.text); }
+  }
+
+  // Send a chat line / build announcement to the room. kind ∈ chat|build|note|
+  // action; the server filters, rate-limits, and stamps identity. A no-op when
+  // the socket is down (chat is best-effort, exactly like presence).
+  function say(text, kind) {
+    const t = typeof text === 'string' ? text.trim() : '';
+    if (!t) return;
+    safeSend({ t: 'chat', text: t.slice(0, 240), kind: kind || 'chat' });
+  }
+
+  function report(mid) {
+    if (typeof mid === 'string' && mid) safeSend({ t: 'report', mid });
   }
 
   function applyRoster(msg) {
@@ -584,11 +602,19 @@ export function createPresence({ scene, reducedMotion = false }) {
       ? performance.now() : Date.now()) / 1000;
   }
 
-  return {
+  const api = {
     connect,
     disconnect,
     update,
+    say,
+    report,
     onNote: null,               // settable (y, colorIndex) for remote notes — unused v1
+    onChat: null,               // settable: (msg) for an incoming chat line
+    onChatLog: null,            // settable: (msgs[]) recent history on join
+    onChatHide: null,           // settable: (mid) a line was shadow-hidden
+    onChatSys: null,            // settable: (text) a private system notice
     get count() { return totalCount; },
+    get connected() { return !!ws && ws.readyState === 1; },
   };
+  return api;
 }

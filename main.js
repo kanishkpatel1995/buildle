@@ -8,6 +8,7 @@ import { Player } from './player.js';
 import { ui } from './ui.js';
 import { audio } from './audio.js';
 import { music } from './music.js';
+import { lofi } from './lofi.js';
 import { Views } from './views.js';
 import { capture } from './capture.js';
 import { Gardener } from './bot.js';
@@ -450,6 +451,7 @@ function presenceState() {
   };
 }
 function joinPresence(island) {
+  ui.chatReset();   // each island has its own room — start the feed fresh
   presence.connect(island, {
     name: profile.name || defaultName,
     body: profile.bodyColor,
@@ -505,20 +507,34 @@ function anchorBesidePlayer() {
   return _padAnchor;
 }
 
-// The whisper chat slides in from the side on any island; tapping the ✦ button
-// toggles it (closed during the voyage / photo modes / a capture).
-let whisperOpen = false;
-function toggleWhisper() {
-  if (voyage.active || capture.busy || views.mode !== 'follow' || modalOpen) return;
-  whisperOpen = !whisperOpen;
-  ui.showFoundry(whisperOpen);
-  if (whisperOpen) ensureAudioAndMusic();
-  audio.ui();
+// The Commons (live chat) is available on any island during normal play. The
+// 💬 button and the in-rail toggles open/close it; it rides the per-island
+// presence socket, so what you say is seen by everyone here. Closed while the
+// voyage / a capture owns the screen.
+function onChatToggle() {
+  if (voyage.active || capture.busy) return;
+  ensureAudioAndMusic();   // opening chat counts as a gesture — wake the music
+  ui.toggleChat();
 }
 
-async function onFoundryBuild(model, prompt) {
-  ui.setFoundryBusy(true);
-  ui.setFoundryStatus('the builder is dreaming…');
+// Plain chat / actions / note announcements → the room. Best-effort: it needs
+// the presence socket (chat is inherently a multiplayer thing).
+let chatOfflineHinted = false;
+function onChatSend(text, kind) {
+  if (!presence.connected) {
+    if (!chatOfflineHinted) { chatOfflineHinted = true; ui.chatSys('chat needs a connection — reconnecting…'); }
+    return;
+  }
+  chatOfflineHinted = false;
+  presence.say(text, kind || 'chat');
+}
+
+// /build, typed into the same chat box: dream it up on the API, rise it on the
+// pad beside you, and tell the room what you made (they can't see your pad —
+// the announcement is how the island learns you built something).
+async function onChatBuild(model, prompt) {
+  ui.setChatBuildBusy(true);
+  ui.chatSys('the builder is dreaming…');
   music.duck();
   let data;
   try {
@@ -529,41 +545,80 @@ async function onFoundryBuild(model, prompt) {
     });
     data = await res.json();
   } catch {
-    ui.setFoundryStatus('the foundry is resting — try again');
-    ui.setFoundryBusy(false);
+    ui.chatSys('the foundry is resting — try again');
+    ui.setChatBuildBusy(false);
     return;
   }
   if (!data || data.error || !Array.isArray(data.blocks)) {
-    ui.setFoundryStatus((data && data.error) || 'the builder got confused — try rephrasing');
-    ui.setFoundryBusy(false);
+    ui.chatSys((data && data.error) || 'the builder got confused — try rephrasing');
+    ui.setChatBuildBusy(false);
     return;
   }
-  ui.setFoundryStatus(`placing ${data.count} blocks…`);
+  ui.chatSys(`placing ${data.count} blocks…`);
   // turn to face the build and ease the camera back so the whole thing frames
   player._dist = Math.max(player._dist, PAD_VIEW_DIST);
   await foundry.summon(data.blocks, anchorBesidePlayer());
   const label = (foundryModels.find((m) => m.id === data.model) || {}).label || 'the builder';
-  ui.setFoundryStatus(`“${data.name}” — built by ${label}`);
-  ui.setFoundryBusy(false);
+  ui.chatSys(`“${data.name}” — built by ${label}`);
+  presence.say(`built “${data.name}” · ${label}`, 'build');   // social proof to the room
+  ui.setChatBuildBusy(false);
 }
 
-// Load the model lineup from the API (falls back to a single model offline).
+// Load the model lineup from the API (falls back to a single model offline),
+// then wire up the chat — one input that talks AND builds.
 fetch(API_BASE + '/api/models')
   .then((r) => r.json())
   .then((d) => { if (d && Array.isArray(d.models) && d.models.length) foundryModels = d.models; })
   .catch(() => {})
-  .finally(() => ui.initFoundry({ models: foundryModels, onBuild: onFoundryBuild }));
+  .finally(() => {
+    ui.initChat({
+      models: foundryModels,
+      expanded: window.matchMedia('(min-width: 760px)').matches,
+      onSend: onChatSend,
+      onBuild: onChatBuild,
+      onReport: (mid) => presence.report(mid),
+      onExpand: () => ensureAudioAndMusic(),
+    });
+  });
 
-// Audio + the song of the day both wake on the first user gesture.
+// Stream the room's chat into the feed; the presence socket carries it all.
+presence.onChat = (m) => ui.chatPush(m);
+presence.onChatLog = (msgs) => ui.chatLog(msgs);
+presence.onChatHide = (mid) => ui.chatHide(mid);
+presence.onChatSys = (text) => ui.chatSys(text);
+
+// Audio + both soundtracks (golden-hour ambient + lo-fi) wake on the first user
+// gesture. Whichever mode is chosen plays; the other waits, silent.
 function ensureAudioAndMusic() {
   audio.ensure();
   const ctx = audio.getRawContext();
   if (ctx && !music.started) {
     music.start(ctx);
+    lofi.start(ctx);
     const dest = audio.getRecordDest();
-    if (dest) music.connectRecorder(dest);
+    if (dest) { music.connectRecorder(dest); lofi.connectRecorder(dest); }
     music.setMuted(profile.muted);
+    lofi.setMuted(profile.muted);
+    applyMusicMode(profile.musicMode);
   }
+}
+
+// The director: 'ambient' steps the lo-fi engine aside, 'lofi' suspends the
+// ambient bus and rolls the beat. Idempotent — safe before audio has started.
+function applyMusicMode(modeName) {
+  const lofiOn = modeName === 'lofi';
+  if (music.started) music.setSuspended(lofiOn);
+  if (lofi.started) lofi.setActive(lofiOn);
+  ui.setMusicMode(modeName);
+}
+
+function toggleMusicMode() {
+  ensureAudioAndMusic();
+  profile.musicMode = profile.musicMode === 'lofi' ? 'ambient' : 'lofi';
+  savePlayer(profile);
+  applyMusicMode(profile.musicMode);
+  ui.toast(profile.musicMode === 'lofi' ? 'lo-fi beats — to build to 🎧' : 'golden-hour ambient');
+  audio.ui();
 }
 
 // ── input ───────────────────────────────────────────────────────────────────
@@ -574,6 +629,28 @@ const MOVE_KEYS = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowlef
 let selectedColor = DEFAULT_COLOR;
 let mode = 'color';                 // 'color' | 'message'
 let messageUsed = false;            // one message block per session
+
+// ── sky mode (build in the air) + brush size ──
+const SKY_Y_MIN = 1;                // lowest floating plane (keep above ground)
+const SKY_Y_MAX = WORLD_HEIGHT - 1; // ceiling (31)
+const SKY_REACH = 12;               // relaxed planar reach while building up high
+let skyMode = false;
+let buildY = 4;                     // the floating build-plane's height (just above head — the
+                                    // follow camera can aim down onto it on the first try)
+let brushSize = 1;                  // 1 single · 2 → 2×2×2 · 3 → rounded 3×3 blob
+
+// Brush footprints, anchored at the clicked cell and grown +x/+y/+z. The 3-brush
+// drops its 8 corners for a rounded, cloud-like blob (19 cells, kinder on the
+// shared budget than a full 27-cube).
+const BRUSH_1 = [[0, 0, 0]];
+const BRUSH_2 = [];
+for (let dx = 0; dx < 2; dx++) for (let dy = 0; dy < 2; dy++) for (let dz = 0; dz < 2; dz++) BRUSH_2.push([dx, dy, dz]);
+const BRUSH_3 = [];
+for (let dx = 0; dx < 3; dx++) for (let dy = 0; dy < 3; dy++) for (let dz = 0; dz < 3; dz++) {
+  const corner = (dx === 0 || dx === 2) && (dy === 0 || dy === 2) && (dz === 0 || dz === 2);
+  if (!corner) BRUSH_3.push([dx, dy, dz]);
+}
+function brushOffsets() { return brushSize === 3 ? BRUSH_3 : brushSize === 2 ? BRUSH_2 : BRUSH_1; }
 let modalOpen = false;              // movement keys pause behind modal overlays
 let lastPointerType = 'mouse';
 let pointerInside = false;
@@ -603,6 +680,82 @@ ghost.add(new THREE.LineSegments(
 ghost.visible = false;
 scene.add(ghost);
 
+// Sky mode: a maths plane the cursor ray meets (free — never blocks face-picking)
+// plus a faint golden disc that shows where that plane floats and how far you can
+// reach. The disc tracks the player at the chosen height; placement snaps to it.
+const _buildPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -buildY);
+const _skyHit = new THREE.Vector3();
+const skyDisc = new THREE.Group();
+{
+  const fill = new THREE.Mesh(
+    new THREE.CircleGeometry(SKY_REACH, 56),
+    new THREE.MeshBasicMaterial({ color: '#FFE8A8', transparent: true, opacity: 0.1, depthWrite: false, side: THREE.DoubleSide }));
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(SKY_REACH - 0.22, SKY_REACH, 56),
+    new THREE.MeshBasicMaterial({ color: '#FFE8A8', transparent: true, opacity: 0.62, depthWrite: false, side: THREE.DoubleSide }));
+  fill.rotation.x = ring.rotation.x = -Math.PI / 2;
+  skyDisc.add(fill, ring);
+}
+skyDisc.renderOrder = 2;   // composite over terrain (still depth-tested by closer geometry)
+skyDisc.visible = false;
+scene.add(skyDisc);
+
+function setBuildY(y) {
+  buildY = Math.min(SKY_Y_MAX, Math.max(SKY_Y_MIN, y | 0));
+  _buildPlane.constant = -buildY;
+  ui.setBuildY(buildY);
+}
+
+function adjustBuildY(delta) {
+  if (!skyMode) return;
+  setBuildY(buildY + delta);
+  audio.ui();
+}
+
+// The cell under the cursor on the floating build-plane (sky mode), or null if
+// the ray runs parallel/away. y is always the plane height.
+function skyCell(clientX, clientY) {
+  _ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
+  _raycaster.setFromCamera(_ndc, player.camera);
+  if (!_raycaster.ray.intersectPlane(_buildPlane, _skyHit)) return null;
+  return { x: Math.floor(_skyHit.x), y: buildY, z: Math.floor(_skyHit.z) };
+}
+
+// Relaxed reach for air-building: planar distance from the player to the cell.
+function withinSkyReach(cell) {
+  const c = player.getCenter();
+  return Math.hypot(cell.x + 0.5 - c.x, cell.z + 0.5 - c.z) <= SKY_REACH;
+}
+
+function toggleSky() {
+  skyMode = !skyMode;
+  ui.setSkyActive(skyMode);
+  if (skyMode && views.mode !== 'follow') setViewMode('follow');
+  audio.ui();
+}
+
+// Place the active brush footprint around an anchor cell. Brush 1 = a single
+// block (identical to the original placement). Returns the count actually placed.
+function placeBrushAt(cx, cy, cz, colorIndex) {
+  let placed = 0;
+  for (const [dx, dy, dz] of brushOffsets()) {
+    const x = cx + dx, y = cy + dy, z = cz + dz;
+    if (y < 0 || y >= WORLD_HEIGHT) continue;
+    if (!world.canPlace(x, y, z) || player.overlapsCell(x, y, z)) continue;
+    if (world.place(x, y, z, colorIndex)) {
+      sync.sendPlace(x, y, z, colorIndex);
+      music.notePlaced(y, colorIndex);
+      placed++;
+    }
+  }
+  if (placed) {
+    audio.place();
+    music.duck();
+    bumpStreak();
+  }
+  return placed;
+}
+
 function pickAt(clientX, clientY) {
   _ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
   _raycaster.setFromCamera(_ndc, player.camera);
@@ -614,20 +767,35 @@ const inBounds = (x, y, z) =>
 
 async function attemptPlace(clientX, clientY) {
   if (views.mode !== 'follow' || voyage.active) return;
-  const hit = pickAt(clientX, clientY);
-  if (!hit) return;
-  if (hit.block && hit.block.m) {
-    // a block with a note opens it instead of building
-    audio.open();
-    ui.showNote({ text: hit.block.m, author: hit.block.n || 'a wanderer' });
-    return;
+  // Sky mode swaps face-picking for the floating build-plane; a click on an
+  // existing block (to open a note / remove) still works via the normal pick.
+  let hit;
+  if (skyMode) {
+    hit = pickAt(clientX, clientY);
+    if (hit && hit.block && hit.block.m) {
+      audio.open();
+      ui.showNote({ text: hit.block.m, author: hit.block.n || 'a wanderer' });
+      return;
+    }
+    const c = skyCell(clientX, clientY);
+    if (!c) return;
+    hit = { placeCell: c, removeCell: null, block: null, inRange: withinSkyReach(c) };
+  } else {
+    hit = pickAt(clientX, clientY);
+    if (!hit) return;
+    if (hit.block && hit.block.m) {
+      // a block with a note opens it instead of building
+      audio.open();
+      ui.showNote({ text: hit.block.m, author: hit.block.n || 'a wanderer' });
+      return;
+    }
   }
   if (!activeWorld.buildable) {
     ui.toast(`${getIsland(voyage.currentIsland).name} — look, don't touch`);
     return;
   }
   if (!hit.placeCell) return;
-  if (!hit.inRange) { ui.toast('too far away — walk closer'); return; }
+  if (!hit.inRange) { ui.toast(skyMode ? 'too far — stand nearer where you want it' : 'too far away — walk closer'); return; }
   const { x, y, z } = hit.placeCell;
   if (!world.canPlace(x, y, z)) {
     if (inBounds(x, y, z) && !world.get(x, y, z)) ui.toast("the gardens can't be built on");
@@ -641,14 +809,15 @@ async function attemptPlace(clientX, clientY) {
     const text = await ui.showComposer();
     modalOpen = false;
     if (!text || !text.trim()) return;
-    // the player may have wandered while the composer was up — re-check range
-    if (player.getCenter().distanceTo(_cellCenter.set(x + 0.5, y + 0.5, z + 0.5)) > PLACE_RANGE) {
-      ui.toast('too far away — walk closer');
-      return;
-    }
+    // the player may have wandered while the composer was up — re-check reach
+    const stillInRange = skyMode
+      ? withinSkyReach({ x, y, z })
+      : player.getCenter().distanceTo(_cellCenter.set(x + 0.5, y + 0.5, z + 0.5)) <= PLACE_RANGE;
+    if (!stillInRange) { ui.toast('too far away — walk closer'); return; }
     const noteText = text.trim().slice(0, 140);
     if (world.place(x, y, z, GLOW_INDEX, { m: noteText, n: profile.name })) {
       sync.sendPlace(x, y, z, GLOW_INDEX, { m: noteText });
+      presence.say('left a note', 'note');   // the room hears it (the words stay on the block)
       audio.place();
       music.duck();
       music.notePlaced(y, GLOW_INDEX);
@@ -658,12 +827,8 @@ async function attemptPlace(clientX, clientY) {
       ui.selectSwatch(selectedColor);
       bumpStreak();
     }
-  } else if (world.place(x, y, z, selectedColor)) {
-    sync.sendPlace(x, y, z, selectedColor);
-    audio.place();
-    music.duck();
-    music.notePlaced(y, selectedColor);
-    bumpStreak();
+  } else {
+    placeBrushAt(x, y, z, selectedColor);
   }
 }
 
@@ -843,6 +1008,12 @@ canvas.addEventListener('pointerleave', () => { pointerInside = false; });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
+  // In sky mode the wheel raises/lowers the build-plane (Shift = ×4); pinch
+  // still zooms. Otherwise the wheel zooms as before.
+  if (skyMode && views.mode === 'follow' && !voyage.active) {
+    adjustBuildY((e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 4 : 1));
+    return;
+  }
   if (views.mode !== 'follow') views.zoom(e.deltaY);
   else player.zoom(e.deltaY);
 }, { passive: false });
@@ -874,7 +1045,11 @@ function updateGhost(t) {
   let visible = false;
   if (lastPointerType !== 'touch' && pointerInside && !(mouse.down && mouse.dragging) && !contextLost &&
       views.mode === 'follow' && !voyage.active && activeWorld.buildable) {
-    const hit = pickAt(mouse.x, mouse.y);
+    // sky mode previews on the floating plane; ground mode on a block face
+    const cell = skyMode ? skyCell(mouse.x, mouse.y) : null;
+    const hit = skyMode
+      ? (cell && withinSkyReach(cell) ? { placeCell: cell, inRange: true, block: null } : null)
+      : pickAt(mouse.x, mouse.y);
     if (hit && hit.placeCell && hit.inRange && !(hit.block && hit.block.m)) {
       const { x, y, z } = hit.placeCell;
       if (world.canPlace(x, y, z) && !player.overlapsCell(x, y, z)) {
@@ -886,6 +1061,17 @@ function updateGhost(t) {
     }
   }
   ghost.visible = visible;
+}
+
+// The sky-mode disc floats at the build height, centred on the player, only
+// while sky mode is on and the island is buildable.
+function updateSkyDisc() {
+  const on = skyMode && views.mode === 'follow' && !voyage.active && activeWorld.buildable;
+  skyDisc.visible = on;
+  if (on) {
+    const c = player.getCenter();
+    skyDisc.position.set(c.x, buildY + 0.02, c.z);
+  }
 }
 
 // ── wiring ──────────────────────────────────────────────────────────────────
@@ -1105,6 +1291,7 @@ ui.init({
   onToggleSound: () => {
     audio.setMuted(!audio.muted);
     music.setMuted(audio.muted);
+    lofi.setMuted(audio.muted);
     profile.muted = audio.muted;
     savePlayer(profile);
     audio.ui();
@@ -1114,11 +1301,18 @@ ui.init({
   onViews: openViewsMenu,
   onCompass: compassFlow,
   onExitView: () => setViewMode('follow'),
-  onWhisper: toggleWhisper,
+  onChat: onChatToggle,
+  onSky: toggleSky,
+  onBuildY: (d) => adjustBuildY(d),
+  onBrush: (n) => { brushSize = n | 0; },
+  onMusicMode: toggleMusicMode,
 });
 ui.setPrompt(TODAY.prompt, TODAY.day);
 ui.setStreak(displayedStreak());
 ui.selectSwatch(selectedColor);
+ui.selectBrush(brushSize);
+ui.setBuildY(buildY);
+ui.setMusicMode(profile.musicMode);
 
 if (!profile.helpSeen || !storageAvailable) helpFlow();
 
@@ -1168,6 +1362,7 @@ const clock = new THREE.Clock();
 let firstFrame = true;
 let cloudsHiddenFor = false;   // tracks the last voyage state we synced clouds to
 let dayCheckT = 0;
+let lastChatCount = -1;        // only repaint the chat header when it changes
 
 function tick() {
   requestAnimationFrame(tick);
@@ -1189,6 +1384,7 @@ function tick() {
   gardener.update(dt, t);
   foundry.update(dt, t);
   presence.update(dt, t);
+  if (presence.count !== lastChatCount) { lastChatCount = presence.count; ui.setChatCount(presence.count); }
   player.update(dt, t);
   views.update(dt, t);
   voyage.update(dt, t);   // after player/views so its camera + fov writes win
@@ -1209,6 +1405,7 @@ function tick() {
   water.update(dt);
   updateEnvironment(dt, t);
   updateGhost(t);
+  updateSkyDisc();
   // Distance-compensated fog: the camera pulling away from the player eases
   // the density down, so a zoomed-out island never drowns in the haze.
   // The voyage owns the fog while it is active (the ascent lifts it).
