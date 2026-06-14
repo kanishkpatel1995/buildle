@@ -16,11 +16,17 @@ import { music } from './music.js';
 // left the southern arc behind the camera from the plaza.
 const OPEN_S_MIN = 1.2, OPEN_S_MAX = 1.8;   // ascent scales with distance
 const OPEN_DIST_REF = 320;             // ascent runs OPEN_S_MIN per this many units
-const MAP_CAM = { x: 20, y: 280, z: 380 };
+const MAP_CAM = { x: 20, y: 280, z: 380 };  // defines the look-down DIRECTION only
 const MAP_LOOK = { x: 20, y: 0, z: 28 };    // pitch ≈ −38°, due north over the ring
-const VOYAGE_FOV = 30;                  // map fov at the reference (landscape) aspect
-const MAP_REF_ASPECT = 1.6;             // MAP_CAM was framed for this aspect
-const MAP_FOV_MAX = 52;                 // widen on portrait phones so the whole ring fits
+const VOYAGE_FOV = 30;                  // fixed — never distorts; framing is by distance
+// The whole archipelago (every island origin ± its radius) sits within this
+// world-radius of MAP_LOOK; the camera pulls back along its view axis until
+// that disc fits the current viewport, so every island is reachable on any
+// screen shape (portrait phones included). Beyond the sky dome the map just
+// shows the flat sunset backdrop — which is all the dome reads as from here.
+const MAP_FIT_R = 215;
+const MAP_FIT_MARGIN = 1.12;
+const MAP_FAR_PAD = 600;                // far-plane headroom past the camera distance
 const FOG_VOYAGE = 0.001;              // below main's floor — the map reads at 400–600u
 
 // Flight
@@ -124,15 +130,31 @@ export function createVoyage({
   let openS = OPEN_S_MIN;
   let startFov = 0;
   let startFog = 0;
-  let mapFov = VOYAGE_FOV;              // recomputed per-open for the live aspect
+  let startFar = 0;                    // player camera far, restored on close/arrival
+  let mapFar = 0;                      // far plane while the map is pulled back
+  const mapFov = VOYAGE_FOV;           // fixed — framing is by distance, never fov
   let bakeStarted = false;
   let flight = null;
 
   // The map camera is framed for a landscape aspect; on a narrower (portrait)
   // viewport widen the fov so the whole archipelago still fits horizontally.
-  function computeMapFov() {
+  // Place the map camera along its fixed look-down axis at the distance that
+  // frames a MAP_FIT_R disc in BOTH screen dimensions at the live aspect — so
+  // narrow/portrait viewports simply pull further back. Writes mapPos; returns
+  // the far-plane distance the pull-back needs.
+  const _mapDir = new THREE.Vector3(
+    MAP_CAM.x - MAP_LOOK.x, MAP_CAM.y - MAP_LOOK.y, MAP_CAM.z - MAP_LOOK.z).normalize();
+  function computeMapPose(outPos) {
     const aspect = (window.innerWidth || 1) / (window.innerHeight || 1);
-    return Math.min(MAP_FOV_MAX, VOYAGE_FOV * Math.max(1, MAP_REF_ASPECT / aspect));
+    const tanV = Math.tan((VOYAGE_FOV * Math.PI) / 360);
+    const dV = MAP_FIT_R / tanV;
+    const dH = MAP_FIT_R / (tanV * Math.max(aspect, 0.01));
+    const d = Math.max(dV, dH) * MAP_FIT_MARGIN;
+    outPos.set(
+      MAP_LOOK.x + _mapDir.x * d,
+      MAP_LOOK.y + _mapDir.y * d,
+      MAP_LOOK.z + _mapDir.z * d);
+    return d + MAP_FAR_PAD;
   }
 
   const startPos = new THREE.Vector3();
@@ -261,8 +283,10 @@ export function createVoyage({
     startPos.copy(cam.position);
     startFov = cam.fov;
     startFog = scene.fog.density;
-    mapFov = computeMapFov();
-    mapPos.set(MAP_CAM.x, MAP_CAM.y, MAP_CAM.z);
+    startFar = cam.far;
+    mapFar = computeMapPose(mapPos);    // frames the whole ring at the live aspect
+    cam.far = Math.max(cam.far, mapFar);
+    cam.updateProjectionMatrix();
     mapLook.set(MAP_LOOK.x, MAP_LOOK.y, MAP_LOOK.z);
     openS = Math.min(OPEN_S_MAX, Math.max(OPEN_S_MIN,
       OPEN_S_MIN * (startPos.distanceTo(mapPos) / OPEN_DIST_REF)));
@@ -285,6 +309,8 @@ export function createVoyage({
     ui.hideVoyageCard();
     ui.setVoyaging(false);
     // hand the camera home; player.update re-eases fov, main re-eases fog
+    player.camera.far = startFar;
+    player.camera.updateProjectionMatrix();
     views._endExternalDrive();
     views.setMode('follow');
   }
@@ -381,6 +407,8 @@ export function createVoyage({
     f.clouds.length = 0;
     flight = null;
     state = 'closed';
+    player.camera.far = startFar;
+    player.camera.updateProjectionMatrix();
     views._endExternalDrive();
     views.setMode('follow');
     ui.setVoyaging(false);

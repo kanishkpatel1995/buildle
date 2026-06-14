@@ -14,6 +14,7 @@ import { Gardener } from './bot.js';
 import { ISLANDS, getIsland, loadShowcase, bakeImpostor } from './islands.js';
 import { createVoyage } from './voyage.js';
 import { createFoundry } from './foundry.js';
+import { FOUNDRY_BUILD_ORIGIN } from './islands/foundry.js';
 import { createPresence } from './presence.js';
 import { createSync } from './sync.js';
 import { getToday } from './prompts.js';
@@ -222,6 +223,17 @@ sunLight.shadow.bias = -0.0005;
 sunLight.shadow.normalBias = 0.02;
 scene.add(sunLight, sunLight.target);
 scene.add(new THREE.HemisphereLight(HEMI_SKY, HEMI_GROUND, HEMI_INTENSITY));
+
+// The shadow camera only spans ±55, sized for one island. Islands sit hundreds
+// of units apart, so the sun (and its shadow frustum) re-centers on whichever
+// island you're standing on — the whole archipelago can't fit one shadow map
+// without going mushy. Direction is preserved (a pure translation of light +
+// target), so the golden-hour angle is identical everywhere.
+function centerSunOn(ox, oz) {
+  sunLight.position.set(SUN_LIGHT_POS.x + ox, SUN_LIGHT_POS.y, SUN_LIGHT_POS.z + oz);
+  sunLight.target.position.set(ox, 0, oz);
+  sunLight.target.updateMatrixWorld();
+}
 
 // Clouds: flat voxel slabs drifting slowly below the island.
 const CLOUD_SHAPES = [
@@ -969,11 +981,36 @@ const voyage = createVoyage({
     // The foundry's chat appears only on the foundry; clear any summoned build
     // when wandering off so it never floats over an unloaded plinth.
     ui.showFoundry(id === 'foundry');
-    if (id !== 'foundry') foundry.clear();
+    onFoundry = id === 'foundry';
+    if (!onFoundry) foundry.clear();
+    // Re-light: bring the sun's shadow frustum to this island so it's lit, not
+    // stuck in the plaza's dim ambient.
+    const o2 = getIsland(id).origin;
+    centerSunOn(o2.x, o2.z);
     // Rejoin the new island's presence room (connect closes the old socket).
     joinPresence(id);
   },
 });
+
+// On the foundry the camera becomes a viewing stage: it frames the plinth from
+// a pulled-back, slowly-orbiting angle so a summoned build is the whole show
+// (the island is too small to stand back and watch otherwise). Movement is
+// parked here — the foundry is a stage, not a place to wander.
+let onFoundry = false;
+let foundryYaw = 0.35;
+const FOUNDRY_CAM = { dist: 44, height: 25, lookY: 8, orbit: 0.05 };
+const _fcDesired = new THREE.Vector3();
+const _fcCenter = new THREE.Vector3(FOUNDRY_BUILD_ORIGIN.x, FOUNDRY_CAM.lookY, FOUNDRY_BUILD_ORIGIN.z);
+function foundryStageCamera(dt) {
+  foundryYaw += FOUNDRY_CAM.orbit * dt;
+  _fcDesired.set(
+    FOUNDRY_BUILD_ORIGIN.x + Math.sin(foundryYaw) * FOUNDRY_CAM.dist,
+    FOUNDRY_CAM.height,
+    FOUNDRY_BUILD_ORIGIN.z + Math.cos(foundryYaw) * FOUNDRY_CAM.dist);
+  const k = 1 - Math.exp(-2.5 * dt);   // glide in from the arrival pose, then orbit
+  player.camera.position.lerp(_fcDesired, k);
+  player.camera.lookAt(_fcCenter);
+}
 
 function compassFlow() {
   if (capture.busy || modalOpen) return;
@@ -1135,7 +1172,7 @@ function tick() {
   dayCheckT += dt;
   if (dayCheckT > 5) { dayCheckT = 0; refreshDay(); }
   if (joystickId === -1) {
-    if (views.mode === 'follow' && !voyage.active) {
+    if (views.mode === 'follow' && !voyage.active && !onFoundry) {
       const kx = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
       const kz = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0);
       player.setMoveInput(kx, kz);
@@ -1151,6 +1188,9 @@ function tick() {
   player.update(dt, t);
   views.update(dt, t);
   voyage.update(dt, t);   // after player/views so its camera + fov writes win
+  // On the foundry the stage camera frames the plinth (overrides the follow cam,
+  // but never while the voyage or a photo/sky view owns the camera).
+  if (onFoundry && !voyage.active && views.mode === 'follow') foundryStageCamera(dt);
   // The plaza's drift-clouds are ground-level atmosphere; from the voyage map
   // altitude they read as flat slabs, so hide them while the voyage owns the
   // camera (toggle only on transitions).
