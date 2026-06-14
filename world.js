@@ -376,6 +376,7 @@ export class World {
     radius = ISLAND_RADIUS,
     buildable = true,
     seeded = true,
+    ground = true,
   } = {}) {
     this.scene = scene;
     this.reducedMotion = reducedMotion;
@@ -384,6 +385,7 @@ export class World {
     this.radius = radius;
     this.buildable = buildable;
     this.seeded = seeded;
+    this.ground = ground;   // false = no grass/rock island mesh (the build pad)
     this._min = -(size >> 1); // local bounds [-size/2 .. size/2 - 1]
     this._max = this._min + size - 1;
     this._chunksPerSide = Math.ceil(size / CHUNK_SIZE);
@@ -435,7 +437,7 @@ export class World {
       this._chunks.push({ solid, glow });
     }
 
-    this._buildIsland();
+    if (this.ground) this._buildIsland();
     this._initParticles();
     this._initPops();
     this._initEnvelopes();

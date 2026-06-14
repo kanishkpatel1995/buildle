@@ -216,7 +216,7 @@ function drawCardOverlay(ctx, { day, prompt, name, streak }) {
 // ── Public API ──────────────────────────────────────────────────────────
 
 export const ui = {
-  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView }) {
+  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView, onWhisper }) {
     promptTextEl = $('prompt-text');
     dayLineEl = $('day-line');
     paletteEl = $('palette');
@@ -292,6 +292,7 @@ export const ui = {
     if (onViews) $('btn-views').addEventListener('click', onViews);
     if (onCompass) $('btn-compass').addEventListener('click', onCompass);
     if (onExitView) photoExitEl.addEventListener('click', onExitView);
+    if (onWhisper) $('btn-whisper').addEventListener('click', onWhisper);
 
     // The mobile palette scrolls; a right-edge fade signals the clipped run
     // and lifts once the user reaches the end.

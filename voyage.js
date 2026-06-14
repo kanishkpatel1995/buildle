@@ -27,7 +27,10 @@ const VOYAGE_FOV = 30;                  // fixed — never distorts; framing is 
 const MAP_FIT_R = 215;
 const MAP_FIT_MARGIN = 1.12;
 const MAP_FAR_PAD = 600;                // far-plane headroom past the camera distance
-const FOG_VOYAGE = 0.001;              // below main's floor — the map reads at 400–600u
+const MAP_FOV_MAX = 46;                 // widen up to here on portrait so the pull-back
+const MAP_FOV_REF = 1.5;                // isn't extreme (less distance = bigger islands)
+const FOG_VOYAGE = 0.00018;            // tiny — the camera pulls back 900–2000u to fit the
+                                      // ring, so islands must stay crisp at that distance
 
 // Flight
 const FLIGHT_S_MIN = 2.6, FLIGHT_S_MAX = 3.4;
@@ -132,7 +135,7 @@ export function createVoyage({
   let startFog = 0;
   let startFar = 0;                    // player camera far, restored on close/arrival
   let mapFar = 0;                      // far plane while the map is pulled back
-  const mapFov = VOYAGE_FOV;           // fixed — framing is by distance, never fov
+  let mapFov = VOYAGE_FOV;             // widened on portrait, recomputed per-open
   let bakeStarted = false;
   let flight = null;
 
@@ -146,7 +149,8 @@ export function createVoyage({
     MAP_CAM.x - MAP_LOOK.x, MAP_CAM.y - MAP_LOOK.y, MAP_CAM.z - MAP_LOOK.z).normalize();
   function computeMapPose(outPos) {
     const aspect = (window.innerWidth || 1) / (window.innerHeight || 1);
-    const tanV = Math.tan((VOYAGE_FOV * Math.PI) / 360);
+    mapFov = Math.min(MAP_FOV_MAX, VOYAGE_FOV * Math.max(1, MAP_FOV_REF / aspect));
+    const tanV = Math.tan((mapFov * Math.PI) / 360);
     const dV = MAP_FIT_R / tanV;
     const dH = MAP_FIT_R / (tanV * Math.max(aspect, 0.01));
     const d = Math.max(dV, dH) * MAP_FIT_MARGIN;

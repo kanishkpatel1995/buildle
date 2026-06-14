@@ -1113,6 +1113,44 @@ body.filming #foundry-chat {
   max-height: 48px;
 }
 
+/* On a wide screen the whisper chat is a translucent panel docked to the right
+   edge, vertically — a quiet sidebar, the build is the show. (Phones keep the
+   bottom-sheet layout above.) */
+@media (min-width: 760px) {
+  #foundry-chat {
+    left: auto;
+    right: calc(var(--space-2) + env(safe-area-inset-right, 0px));
+    bottom: auto;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 264px;
+    background: rgba(43, 29, 58, 0.42);
+    animation: panel-in 240ms cubic-bezier(0.34, 1.3, 0.64, 1);
+  }
+
+  #foundry-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #foundry-model,
+  #foundry-prompt,
+  #foundry-build {
+    width: 100%;
+    max-width: none;
+  }
+}
+
+@keyframes panel-in {
+  from { opacity: 0; transform: translate(16px, -50%); }
+  to { opacity: 1; transform: translate(0, -50%); }
+}
+
+/* The whisper chat hides while another mode owns the screen. */
+body.photo-mode #foundry-chat {
+  display: none;
+}
+
 /* ── Filming: vertical letterbox + chrome ──────────────────────────────── */
 body.filming {
   background: #241636;

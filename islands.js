@@ -52,6 +52,7 @@ export const ISLANDS = [
   { id: 'orchard',      name: 'the hanging orchard',    epithet: 'it has always been harvest evening',    origin: { x: -120, z: -120 }, radius: 25, kind: 'showcase' },
   { id: 'astronomers',  name: "the astronomer's reach", epithet: 'watching for a night that never comes', origin: { x: 40, z: -170 },   radius: 21, kind: 'showcase' },
   { id: 'foundry',      name: 'the foundry',            epithet: 'speak, and it is built',                 origin: { x: 150, z: 30 },    radius: 16, kind: 'showcase' },
+  { id: 'fifa',         name: 'galá stadium',           epithet: 'the cup, at golden hour',                origin: { x: -70, z: 70 },    radius: 30, kind: 'showcase' },
 ];
 
 export function getIsland(id) {

@@ -243,8 +243,23 @@ async function callModel(env, payload) {
   }
 }
 
-async function aiBuild(request, env) {
+// Fire-and-forget log of a build attempt to the plaza DO's builds table.
+async function logBuild(env, ctx, ip, rec) {
+  if (!ctx) return;
+  ctx.waitUntil((async () => {
+    try {
+      rec.iphash = (await sha256Hex(ip + (env.TOKEN_SECRET || ''))).slice(0, 32);
+      const stub = env.PLAZA.get(env.PLAZA.idFromName('plaza'));
+      await stub.fetch('https://do.internal/internal/log', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(rec),
+      });
+    } catch { /* analytics are best-effort, never block a build */ }
+  })());
+}
+
+async function aiBuild(request, env, ctx) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const country = request.headers.get('CF-IPCountry') || '';
   if (buildThrottled(ip)) return json({ error: 'the foundry is catching its breath — try again soon' }, 429);
   if (!env.OPENROUTER_API_KEY) return json({ error: 'the foundry is offline' }, 503);
 
@@ -255,7 +270,12 @@ async function aiBuild(request, env) {
   const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
   if (prompt.length < 1) return json({ error: 'tell the builder what to make' }, 400);
   if (prompt.length > BUILD_PROMPT_MAX) return json({ error: 'keep the request short and sweet' }, 400);
-  if (matcher.hasMatch(prompt)) return json({ error: "let's keep it kind" }, 400);
+  if (matcher.hasMatch(prompt)) {
+    logBuild(env, ctx, ip, { ts: Date.now(), model, prompt, blocks: 0, ok: false, reason: 'blocked', country });
+    return json({ error: "let's keep it kind" }, 400);
+  }
+  const logResult = (ok, blocks, reason) =>
+    logBuild(env, ctx, ip, { ts: Date.now(), model, prompt, blocks, ok, reason, country });
 
   const system =
     'You are the foundry builder in Buildle, a cozy golden-hour voxel game. ' +
@@ -285,8 +305,9 @@ async function aiBuild(request, env) {
   if (res && !res.ok && res.status >= 400 && res.status < 500) {
     res = await callModel(env, base);
   }
-  if (!res) return json({ error: 'the builder took too long — try again' }, 504);
+  if (!res) { logResult(false, 0, 'timeout'); return json({ error: 'the builder took too long — try again' }, 504); }
   if (!res.ok) {
+    logResult(false, 0, 'model');
     return json({ error: 'that model is busy right now — try another' }, 502);
   }
   const data = await res.json().catch(() => null);
@@ -295,27 +316,32 @@ async function aiBuild(request, env) {
     : null;
   const parsed = parseBuildJson(content);
   if (!parsed || !Array.isArray(parsed.ops)) {
+    logResult(false, 0, 'parse');
     return json({ error: 'the builder got confused — try rephrasing' }, 422);
   }
   const blocks = expandOps(parsed.ops.slice(0, BUILD_MAX_OPS));
   if (blocks.length === 0) {
+    logResult(false, 0, 'empty');
     return json({ error: 'the builder drew a blank — try rephrasing' }, 422);
   }
   const name = typeof parsed.name === 'string' && parsed.name.trim()
     ? parsed.name.trim().slice(0, 60)
     : prompt.slice(0, 60);
+  logResult(true, blocks.length, 'ok');
   return json({ name, model, count: blocks.length, blocks });
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS });
     }
     const url = new URL(request.url);
+    // /internal/* is DO-only; never reachable from the public edge.
+    if (url.pathname.startsWith('/internal/')) return json({ error: 'not found' }, 404);
     if (!url.pathname.startsWith('/api/')) return json({ error: 'not found' }, 404);
     if (url.pathname === '/api/build' && request.method === 'POST') {
-      return await aiBuild(request, env);
+      return await aiBuild(request, env, ctx);
     }
     if (url.pathname === '/api/models' && request.method === 'GET') {
       return json({ models: BUILD_MODELS });
@@ -352,6 +378,7 @@ export class IslandDO {
         CREATE TABLE IF NOT EXISTS protectedcols(k TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS protectedblocks(k TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS archive(day INTEGER PRIMARY KEY, blob TEXT);
+        CREATE TABLE IF NOT EXISTS builds(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, model TEXT, prompt TEXT, blocks INTEGER, ok INTEGER, reason TEXT, iphash TEXT, country TEXT);
       `);
       // In-memory cache of meta (DO is single-threaded; write-through below).
       this._version = Number(this.getMeta('version') ?? this.setMeta('version', 0));
@@ -448,10 +475,48 @@ export class IslandDO {
       if (path === '/api/name' && method === 'POST') return await this.name(request);
       const m = path.match(/^\/api\/archive\/(-?\d+)$/);
       if (m && method === 'GET') return this.archiveDay(Number(m[1]));
+      if (path === '/internal/log' && method === 'POST') return await this.logBuild(request);
+      if (path === '/api/admin/builds' && method === 'GET') return this.adminBuilds(request, url);
       return json({ error: 'not found' }, 404);
     } catch (err) {
       return json({ error: 'internal error' }, 500);
     }
+  }
+
+  // Build analytics: every foundry/whisper request is logged here (prompt,
+  // model, outcome, country, and a SALTED HASH of the IP — never the raw IP).
+  async logBuild(request) {
+    const r = await readJson(request);
+    if (!r) return json({ ok: false }, 400);
+    this.sql.exec(
+      'INSERT INTO builds(ts, model, prompt, blocks, ok, reason, iphash, country) VALUES(?,?,?,?,?,?,?,?)',
+      Number(r.ts) || Date.now(),
+      String(r.model || '').slice(0, 80),
+      String(r.prompt || '').slice(0, 240),
+      Number(r.blocks) || 0,
+      r.ok ? 1 : 0,
+      String(r.reason || '').slice(0, 40),
+      String(r.iphash || '').slice(0, 64),
+      String(r.country || '').slice(0, 4),
+    );
+    return json({ ok: true });
+  }
+
+  // GET /api/admin/builds — token-gated (header x-admin-key === TOKEN_SECRET).
+  // Returns the most recent builds for the dashboard.
+  adminBuilds(request, url) {
+    const key = request.headers.get('x-admin-key') || url.searchParams.get('key') || '';
+    const secret = this.env.TOKEN_SECRET || '';
+    if (key.length !== secret.length || key.length === 0) return json({ error: 'forbidden' }, 403);
+    let diff = 0;
+    for (let i = 0; i < secret.length; i++) diff |= secret.charCodeAt(i) ^ key.charCodeAt(i);
+    if (diff !== 0) return json({ error: 'forbidden' }, 403);
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+    const rows = this.sql.exec(
+      'SELECT ts, model, prompt, blocks, ok, reason, country FROM builds ORDER BY id DESC LIMIT ?', limit,
+    ).toArray();
+    const total = this.sql.exec('SELECT COUNT(*) AS n FROM builds').toArray()[0].n;
+    return json({ total, builds: rows });
   }
 
   // 1. POST /api/hello {deviceId, name?}

@@ -11,14 +11,18 @@ import { World, PALETTE } from './world.js';
 import { createCharacter } from './player.js';
 import { audio } from './audio.js';
 import { music } from './music.js';
-import { FOUNDRY_BUILD_ORIGIN } from './islands/foundry.js';
 
 // ── build World geometry ─────────────────────────────────────────────────────
-const WORLD_SIZE = 32;            // 32×32 footprint, radius 16, centered on the plinth
+const WORLD_SIZE = 32;            // 32×32 footprint, radius 16
 const WORLD_RADIUS = 16;
 const BUILD_SPAN = 24;            // builds are authored in a 24-wide 0..23 grid
-const BUILD_HALF = 12;            // build-local bx → global origin.x − 12 + bx
+const BUILD_HALF = 12;            // build-local bx → pad-local bx − 12 (centered on the pad)
 const Y_MAX = 31;                 // world height ceiling (world.js WORLD_HEIGHT − 1)
+
+// The pad: a small sandstone plot the build rises on, parented to a movable
+// group so it can appear beside the player on any island.
+const PAD_RADIUS = 14;
+const PAD_THICK = 1.4;
 
 // ── pacing — small builds ~2s, 600 ~4s, huge ones cap ~6s ────────────────────
 const PLACE_RATE = 140;           // target cells/second at the sweet spot
@@ -61,16 +65,31 @@ function hashCell(x, z, salt = 0) {
 }
 
 export function createFoundry({ scene, reducedMotion = false }) {
-  const world = new World(scene, {
+  // Everything lives under a movable group: the build world (no ground island),
+  // a small plot, and the builder. summon() drops the whole group beside the
+  // player, so a build can rise on any island.
+  const padGroup = new THREE.Group();
+  padGroup.visible = false;          // hidden until the first summon
+  scene.add(padGroup);
+
+  const world = new World(padGroup, {
     reducedMotion,
-    origin: FOUNDRY_BUILD_ORIGIN,
+    origin: { x: 0, z: 0 },
     size: WORLD_SIZE,
     radius: WORLD_RADIUS,
     buildable: false,
     seeded: false,
+    ground: false,                   // the pad provides its own plot
   });
   world.load(null);
-  const ox = world.origin.x, oz = world.origin.z;
+
+  // the sandstone plot beneath the build (build cells center on local 0)
+  const platform = new THREE.Mesh(
+    new THREE.CylinderGeometry(PAD_RADIUS, PAD_RADIUS * 0.9, PAD_THICK, 28),
+    new THREE.MeshLambertMaterial({ color: PALETTE[1].hex }));
+  platform.position.set(0, -PAD_THICK / 2, 0);
+  platform.receiveShadow = true;
+  padGroup.add(platform);
 
   // ── the builder ─────────────────────────────────────────────────────────
   const c = createCharacter({ bodyColorIndex: BODY_COLOR });
@@ -99,9 +118,9 @@ export function createFoundry({ scene, reducedMotion = false }) {
   tip.castShadow = true;
   armR.add(shaft, tip);
 
-  group.position.set(ox + LECTERN_LOCAL.x, 0, oz + LECTERN_LOCAL.z);
+  group.position.set(LECTERN_LOCAL.x, 0, LECTERN_LOCAL.z);
   group.rotation.y = FACE_YAW;
-  scene.add(group);
+  padGroup.add(group);
 
   // ── state ─────────────────────────────────────────────────────────────────
   let queue = null;          // sorted [bx, by, bz, c] pending this build
@@ -112,9 +131,24 @@ export function createFoundry({ scene, reducedMotion = false }) {
   let rate = PLACE_RATE;     // cells/second for the active build
   let resolveBuild = null;   // resolves the build() Promise when the last lands
 
-  const blinkSeed = hashCell(ox, oz, 13);
-  let blinkT = BLINK_EVERY_MIN + blinkSeed * (BLINK_EVERY_MAX - BLINK_EVERY_MIN);
+  let blinkT = BLINK_EVERY_MIN + hashCell(7, 13, 3) * (BLINK_EVERY_MAX - BLINK_EVERY_MIN);
   let armBlend = 0;          // 0 idle → 1 fully raised (eased)
+
+  // Drop the pad beside the player (build faces them), then build. anchor =
+  // { x, z, yaw } in world space.
+  function summon(blocks, anchor) {
+    if (anchor) {
+      padGroup.position.set(anchor.x, 0, anchor.z);
+      padGroup.rotation.y = anchor.yaw || 0;
+    }
+    padGroup.visible = true;
+    return build(blocks);
+  }
+
+  function hide() {
+    clear();
+    padGroup.visible = false;
+  }
 
   function clear() {
     world.load(null);
@@ -134,7 +168,7 @@ export function createFoundry({ scene, reducedMotion = false }) {
   // Place one queued cell; ration the audio + music so a flood stays calm.
   function placeOne() {
     const b = queue[qIndex++];
-    const ok = world.forcePlace(ox - BUILD_HALF + b[0], b[1], oz - BUILD_HALF + b[2], b[3]);
+    const ok = world.forcePlace(b[0] - BUILD_HALF, b[1], b[2] - BUILD_HALF, b[3]);
     if (ok) {
       placed++;
       if (placed % AUDIO_EVERY === 0) audio.place();
@@ -250,7 +284,9 @@ export function createFoundry({ scene, reducedMotion = false }) {
     group,
     update,
     build,
+    summon,
     clear,
+    hide,
     get building() { return building; },
     get count() { return placed; },
   };

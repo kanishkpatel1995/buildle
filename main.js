@@ -14,7 +14,6 @@ import { Gardener } from './bot.js';
 import { ISLANDS, getIsland, loadShowcase, bakeImpostor } from './islands.js';
 import { createVoyage } from './voyage.js';
 import { createFoundry } from './foundry.js';
-import { FOUNDRY_BUILD_ORIGIN } from './islands/foundry.js';
 import { createPresence } from './presence.js';
 import { createSync } from './sync.js';
 import { getToday } from './prompts.js';
@@ -493,6 +492,30 @@ const API_BASE = (localStorage.getItem('buildle_api_v1') || 'https://buildle-api
 const FALLBACK_MODELS = [{ id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', blurb: 'quick and clever' }];
 let foundryModels = FALLBACK_MODELS;
 
+// Where a summoned build rises: a little plot in front of where the player
+// faces, far enough that the follow camera frames it.
+const PAD_AHEAD = 16;
+const PAD_VIEW_DIST = 34;   // ease the follow camera back this far to frame the build
+const _padAnchor = { x: 0, z: 0, yaw: 0 };
+function anchorBesidePlayer() {
+  const fx = Math.sin(player._yaw), fz = Math.cos(player._yaw);   // the way the player faces
+  _padAnchor.x = player.position.x + fx * PAD_AHEAD;
+  _padAnchor.z = player.position.z + fz * PAD_AHEAD;
+  _padAnchor.yaw = player._yaw + Math.PI;   // builder stands on the player's side, facing the build
+  return _padAnchor;
+}
+
+// The whisper chat slides in from the side on any island; tapping the ✦ button
+// toggles it (closed during the voyage / photo modes / a capture).
+let whisperOpen = false;
+function toggleWhisper() {
+  if (voyage.active || capture.busy || views.mode !== 'follow' || modalOpen) return;
+  whisperOpen = !whisperOpen;
+  ui.showFoundry(whisperOpen);
+  if (whisperOpen) ensureAudioAndMusic();
+  audio.ui();
+}
+
 async function onFoundryBuild(model, prompt) {
   ui.setFoundryBusy(true);
   ui.setFoundryStatus('the builder is dreaming…');
@@ -516,7 +539,9 @@ async function onFoundryBuild(model, prompt) {
     return;
   }
   ui.setFoundryStatus(`placing ${data.count} blocks…`);
-  await foundry.build(data.blocks);
+  // turn to face the build and ease the camera back so the whole thing frames
+  player._dist = Math.max(player._dist, PAD_VIEW_DIST);
+  await foundry.summon(data.blocks, anchorBesidePlayer());
   const label = (foundryModels.find((m) => m.id === data.model) || {}).label || 'the builder';
   ui.setFoundryStatus(`“${data.name}” — built by ${label}`);
   ui.setFoundryBusy(false);
@@ -978,11 +1003,9 @@ const voyage = createVoyage({
     if (dockSpawn.x !== o.x || dockSpawn.z !== o.z) {
       player._camYaw = Math.atan2(dockSpawn.x - o.x, dockSpawn.z - o.z);
     }
-    // The foundry's chat appears only on the foundry; clear any summoned build
-    // when wandering off so it never floats over an unloaded plinth.
-    ui.showFoundry(id === 'foundry');
-    onFoundry = id === 'foundry';
-    if (!onFoundry) foundry.clear();
+    // Leaving an island dismisses any build you summoned there (it's a personal
+    // pad beside you, not a fixture). The whisper chat itself stays available.
+    foundry.hide();
     // Re-light: bring the sun's shadow frustum to this island so it's lit, not
     // stuck in the plaza's dim ambient.
     const o2 = getIsland(id).origin;
@@ -991,26 +1014,6 @@ const voyage = createVoyage({
     joinPresence(id);
   },
 });
-
-// On the foundry the camera becomes a viewing stage: it frames the plinth from
-// a pulled-back, slowly-orbiting angle so a summoned build is the whole show
-// (the island is too small to stand back and watch otherwise). Movement is
-// parked here — the foundry is a stage, not a place to wander.
-let onFoundry = false;
-let foundryYaw = 0.35;
-const FOUNDRY_CAM = { dist: 44, height: 25, lookY: 8, orbit: 0.05 };
-const _fcDesired = new THREE.Vector3();
-const _fcCenter = new THREE.Vector3(FOUNDRY_BUILD_ORIGIN.x, FOUNDRY_CAM.lookY, FOUNDRY_BUILD_ORIGIN.z);
-function foundryStageCamera(dt) {
-  foundryYaw += FOUNDRY_CAM.orbit * dt;
-  _fcDesired.set(
-    FOUNDRY_BUILD_ORIGIN.x + Math.sin(foundryYaw) * FOUNDRY_CAM.dist,
-    FOUNDRY_CAM.height,
-    FOUNDRY_BUILD_ORIGIN.z + Math.cos(foundryYaw) * FOUNDRY_CAM.dist);
-  const k = 1 - Math.exp(-2.5 * dt);   // glide in from the arrival pose, then orbit
-  player.camera.position.lerp(_fcDesired, k);
-  player.camera.lookAt(_fcCenter);
-}
 
 function compassFlow() {
   if (capture.busy || modalOpen) return;
@@ -1111,6 +1114,7 @@ ui.init({
   onViews: openViewsMenu,
   onCompass: compassFlow,
   onExitView: () => setViewMode('follow'),
+  onWhisper: toggleWhisper,
 });
 ui.setPrompt(TODAY.prompt, TODAY.day);
 ui.setStreak(displayedStreak());
@@ -1172,7 +1176,7 @@ function tick() {
   dayCheckT += dt;
   if (dayCheckT > 5) { dayCheckT = 0; refreshDay(); }
   if (joystickId === -1) {
-    if (views.mode === 'follow' && !voyage.active && !onFoundry) {
+    if (views.mode === 'follow' && !voyage.active) {
       const kx = (keys.has('d') || keys.has('arrowright') ? 1 : 0) - (keys.has('a') || keys.has('arrowleft') ? 1 : 0);
       const kz = (keys.has('s') || keys.has('arrowdown') ? 1 : 0) - (keys.has('w') || keys.has('arrowup') ? 1 : 0);
       player.setMoveInput(kx, kz);
@@ -1188,9 +1192,6 @@ function tick() {
   player.update(dt, t);
   views.update(dt, t);
   voyage.update(dt, t);   // after player/views so its camera + fov writes win
-  // On the foundry the stage camera frames the plinth (overrides the follow cam,
-  // but never while the voyage or a photo/sky view owns the camera).
-  if (onFoundry && !voyage.active && views.mode === 'follow') foundryStageCamera(dt);
   // The plaza's drift-clouds are ground-level atmosphere; from the voyage map
   // altitude they read as flat slabs, so hide them while the voyage owns the
   // camera (toggle only on transitions).
