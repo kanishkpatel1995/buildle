@@ -162,11 +162,23 @@ const BUILD_MODELS = [
 const BUILD_MODEL_IDS = new Set(BUILD_MODELS.map((m) => m.id));
 
 const BUILD_ENVELOPE = 24;        // builds fit in a 24×24×24 box, origin corner (0,0,0)
+const BUILD_CENTER = 12;          // builds are centred on x,z = 12 in that box
 const BUILD_MAX_OPS = 96;         // primitives the model may emit
-const BUILD_MAX_BLOCKS = 3000;    // expanded-cell cap (drops the rest)
+const BUILD_MAX_BLOCKS = 600;     // expanded-cell cap (drops the rest; also bounds commit work)
 const BUILD_PROMPT_MAX = 200;
 const BUILD_TIMEOUT_MS = 45000;
-const BUILD_PER_HOUR = 40;        // per-IP
+const BUILD_PER_HOUR = 40;        // per-IP, soft (isolate-local) — the real caps are the DO gate
+// Persistent daily ceilings (in the plaza DO's SQLite — survive isolate recycling
+// and IP/identity rotation), checked BEFORE the paid model call. The global cap
+// is the hard bill ceiling; the per-player/per-IP caps bound any one actor.
+const BUILD_GLOBAL_DAILY = 3000;  // total model calls/day — the cost ceiling
+const BUILD_PLAYER_DAILY = 40;    // builds/day per identity
+const BUILD_IP_DAILY = 60;        // builds/day per IP (catches identity rotation)
+// Committing an AI build into the shared world (the plaza): how many cells one
+// build may write, the per-IP daily cell budget (grief cap), and the cooldown.
+const BUILD_WORLD_CAP = 180;      // cells one build may commit (≪ the 4096-column floor)
+const BUILD_IP_CELLS_DAILY = 1500;// committed cells/day per IP
+const BUILD_COMMIT_COOLDOWN_MS = 8000;
 
 // One filled box per op (a single block is 1×1×1) — a uniform shape keeps the
 // JSON schema strict-mode friendly and trivial to expand.
@@ -304,6 +316,30 @@ async function aiBuild(request, env, ctx) {
   const logResult = (ok, blocks, reason) =>
     logBuild(env, ctx, ip, { ts: Date.now(), model, prompt, blocks, ok, reason, country });
 
+  // Gate the PAID model call behind a valid identity + persistent daily ceilings
+  // (global bill cap + per-identity + per-IP), enforced in the plaza DO so they
+  // survive isolate recycling and IP/identity rotation. Fails closed.
+  const iphash = (await sha256Hex(ip + (env.TOKEN_SECRET || ''))).slice(0, 32);
+  try {
+    const stub = env.PLAZA.get(env.PLAZA.idFromName('plaza'));
+    const gr = await stub.fetch('https://do.internal/internal/buildgate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ playerId: body.playerId, token: body.token, iphash }),
+    });
+    const gate = await gr.json().catch(() => null);
+    if (!gate || !gate.ok) {
+      const reason = (gate && gate.reason) || 'fail';
+      logResult(false, 0, 'gate-' + reason);
+      if (reason === 'auth') return json({ error: 'reconnecting — try again in a moment' }, 401);
+      if (reason === 'busy') return json({ error: 'the foundry hit its limit for today — back tomorrow' }, 429);
+      return json({ error: 'building a lot — give it a little while' }, 429);
+    }
+  } catch {
+    logResult(false, 0, 'gate-err');
+    return json({ error: 'the foundry is resting — try again' }, 503);
+  }
+
   const system =
     'You are the foundry builder in Buildle, a cozy golden-hour voxel game. ' +
     'Turn the player\'s request into a small, charming voxel sculpture made of filled boxes.\n' +
@@ -323,7 +359,7 @@ async function aiBuild(request, env, ctx) {
       { role: 'user', content: prompt },
     ],
     temperature: 0.8,
-    max_tokens: 8000,
+    max_tokens: 2000,
   };
 
   // Try with json_object mode first; if a provider rejects it, retry once on
@@ -354,6 +390,36 @@ async function aiBuild(request, env, ctx) {
   const name = typeof parsed.name === 'string' && parsed.name.trim()
     ? parsed.name.trim().slice(0, 60)
     : prompt.slice(0, 60);
+
+  // Commit the build into the shared world when asked (the player is on the
+  // plaza and authenticated) so it persists, syncs to everyone, and is
+  // deletable. Otherwise return the raw build for the client's preview pad.
+  const wantCommit = body.commit === true &&
+    typeof body.playerId === 'string' && typeof body.token === 'string' &&
+    Number.isFinite(body.ox) && Number.isFinite(body.oz);
+  if (wantCommit) {
+    let committed = null;
+    try {
+      const stub = env.PLAZA.get(env.PLAZA.idFromName('plaza'));
+      const r = await stub.fetch('https://do.internal/internal/commitbuild', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ playerId: body.playerId, token: body.token, ox: body.ox, oz: body.oz, name, blocks, iphash }),
+      });
+      committed = await r.json().catch(() => null);
+      if (r.status === 401) { logResult(false, 0, 'unauth'); return json({ error: 'reconnecting — try again in a moment' }, 401); }
+      if (r.status === 429) { logResult(false, 0, 'cooldown'); return json({ error: (committed && committed.error) || 'building too fast — give it a breath' }, 429); }
+    } catch { committed = null; }
+    if (committed && Array.isArray(committed.blocks) && committed.blocks.length) {
+      logResult(true, committed.blocks.length, 'ok');
+      return json({ name, model, count: committed.blocks.length, blocks: committed.blocks, version: committed.version, committed: true });
+    }
+    // commit produced nothing (e.g. the whole footprint was occupied) — fall
+    // back to the raw build so the client can still preview it on the pad.
+    logResult(true, blocks.length, committed ? 'commit-empty' : 'commit-fail');
+    return json({ name, model, count: blocks.length, blocks, committed: false });
+  }
+
   logResult(true, blocks.length, 'ok');
   return json({ name, model, count: blocks.length, blocks });
 }
@@ -406,6 +472,7 @@ export class IslandDO {
         CREATE TABLE IF NOT EXISTS protectedblocks(k TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS archive(day INTEGER PRIMARY KEY, blob TEXT);
         CREATE TABLE IF NOT EXISTS builds(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, model TEXT, prompt TEXT, blocks INTEGER, ok INTEGER, reason TEXT, iphash TEXT, country TEXT);
+        CREATE TABLE IF NOT EXISTS buildquota(k TEXT, day INTEGER, n INTEGER, PRIMARY KEY(k, day));
       `);
       // In-memory cache of meta (DO is single-threaded; write-through below).
       this._version = Number(this.getMeta('version') ?? this.setMeta('version', 0));
@@ -459,6 +526,7 @@ export class IslandDO {
       this.sql.exec('DELETE FROM edits');
       this.sql.exec('DELETE FROM protectedcols');
       this.sql.exec('DELETE FROM protectedblocks');
+      this.sql.exec('DELETE FROM buildquota WHERE day < ?', cur);   // prune yesterday's gate counters
       this._seeded = 0; this.setMeta('seeded', 0);
       this._day = cur; this.setMeta('day', cur);
       this._dayStartVersion = this._version; this.setMeta('dayStartVersion', this._version);
@@ -503,6 +571,8 @@ export class IslandDO {
       const m = path.match(/^\/api\/archive\/(-?\d+)$/);
       if (m && method === 'GET') return this.archiveDay(Number(m[1]));
       if (path === '/internal/log' && method === 'POST') return await this.logBuild(request);
+      if (path === '/internal/buildgate' && method === 'POST') return await this.buildGate(request);
+      if (path === '/internal/commitbuild' && method === 'POST') return await this.commitBuild(request);
       if (path === '/api/admin/builds' && method === 'GET') return this.adminBuilds(request, url);
       return json({ error: 'not found' }, 404);
     } catch (err) {
@@ -527,6 +597,104 @@ export class IslandDO {
       String(r.country || '').slice(0, 4),
     );
     return json({ ok: true });
+  }
+
+  // Read/bump a persistent daily counter (survives isolate recycling and IP /
+  // identity rotation — unlike the Worker's in-memory Maps).
+  quotaGet(k) {
+    const row = this.sql.exec('SELECT n FROM buildquota WHERE k = ? AND day = ?', k, this._day).toArray()[0];
+    return row ? row.n : 0;
+  }
+  quotaBump(k, by = 1) {
+    this.sql.exec(
+      'INSERT INTO buildquota(k, day, n) VALUES(?, ?, ?) ON CONFLICT(k, day) DO UPDATE SET n = n + excluded.n',
+      k, this._day, by,
+    );
+  }
+
+  // Gate the PAID model call: require a valid identity and enforce persistent
+  // daily ceilings (a hard global bill cap + per-identity + per-IP) BEFORE the
+  // Worker spends anything on OpenRouter. Counts the attempt on success.
+  async buildGate(request) {
+    const r = await readJson(request);
+    if (!r) return json({ ok: false, reason: 'bad' }, 400);
+    if (!(await this.verify(r.playerId, r.token))) return json({ ok: false, reason: 'auth' }, 401);
+    const iphash = typeof r.iphash === 'string' ? r.iphash.slice(0, 64) : 'noip';
+    if (this.quotaGet('g') >= BUILD_GLOBAL_DAILY) return json({ ok: false, reason: 'busy' }, 429);
+    if (this.quotaGet('p:' + r.playerId) >= BUILD_PLAYER_DAILY) return json({ ok: false, reason: 'player' }, 429);
+    if (this.quotaGet('ip:' + iphash) >= BUILD_IP_DAILY) return json({ ok: false, reason: 'ip' }, 429);
+    this.ctx.storage.transactionSync(() => {
+      this.quotaBump('g');
+      this.quotaBump('p:' + r.playerId);
+      this.quotaBump('ip:' + iphash);
+    });
+    return json({ ok: true });
+  }
+
+  // Commit an AI build into the shared world. Called only from the Worker
+  // (internal route) after it has generated the blocks via OpenRouter — so the
+  // cell list is trustworthy, not client-supplied. Maps the build-local cells
+  // (0..23, centred on 12) to world coords at the player's chosen anchor,
+  // refuses to overwrite occupied/protected cells, caps the size, charges a
+  // per-IP daily cell budget (grief cap), and writes real edit-log entries so
+  // every client receives the build through the normal delta poll. Attributed to
+  // the player (so their own client skips the echo and animates it locally).
+  async commitBuild(request) {
+    const r = await readJson(request);
+    if (!r) return json({ error: 'bad request' }, 400);
+    if (!(await this.verify(r.playerId, r.token))) return json({ error: 'unauthorized' }, 401);
+    const blocks = Array.isArray(r.blocks) ? r.blocks : [];
+    if (!blocks.length) return json({ blocks: [], version: this._version });
+
+    const now = Date.now();
+    if (!this._buildCooldown) this._buildCooldown = new Map();
+    if (now - (this._buildCooldown.get(r.playerId) || 0) < BUILD_COMMIT_COOLDOWN_MS) {
+      return json({ error: 'building too fast — give it a breath' }, 429);
+    }
+    this._buildCooldown.set(r.playerId, now);   // charge the cooldown even on a no-op commit
+
+    const iphash = typeof r.iphash === 'string' ? r.iphash.slice(0, 64) : 'noip';
+    const ipCellsUsed = this.quotaGet('cells:' + iphash);
+    let cellBudget = Math.max(0, Math.min(BUILD_WORLD_CAP, BUILD_IP_CELLS_DAILY - ipCellsUsed));
+    if (cellBudget <= 0) return json({ blocks: [], version: this._version, error: 'daily build space used up' });
+
+    const ox = clampInt(r.ox, MIN_XZ, MAX_XZ);
+    const oz = clampInt(r.oz, MIN_XZ, MAX_XZ);
+    const prow = this.sql.exec('SELECT name FROM players WHERE id = ?', r.playerId).toArray()[0];
+    const playerName = (prow && prow.name) || FALLBACK_NAME;
+    const day = this._day;
+    let version = this._version;
+    const committed = [];
+    // Examine at most BUILD_MAX_BLOCKS cells (the generation cap) — and stop once
+    // the cell budget is spent — so an all-occupied footprint can't run a read
+    // storm against the single-threaded DO.
+    const candidates = blocks.slice(0, BUILD_MAX_BLOCKS);
+    this.ctx.storage.transactionSync(() => {
+      for (const b of candidates) {
+        if (committed.length >= cellBudget) break;
+        if (!Array.isArray(b) || b.length < 4) continue;
+        const wx = ox + (clampInt(b[0], 0, BUILD_ENVELOPE) - BUILD_CENTER);
+        const wy = clampInt(b[1], MIN_Y, MAX_Y);
+        const wz = oz + (clampInt(b[2], 0, BUILD_ENVELOPE) - BUILD_CENTER);
+        const c = clampInt(b[3], 0, 15);
+        if (wx < MIN_XZ || wx > MAX_XZ || wz < MIN_XZ || wz > MAX_XZ) continue;
+        const k = `${wx},${wy},${wz}`;
+        // never overwrite protected columns/cells or anything already placed
+        if (this.sql.exec('SELECT 1 FROM protectedcols WHERE k = ?', `${wx},${wz}`).toArray().length) continue;
+        if (this.sql.exec('SELECT 1 FROM protectedblocks WHERE k = ?', k).toArray().length) continue;
+        if (this.sql.exec('SELECT 1 FROM blocks WHERE k = ?', k).toArray().length) continue;
+        version += 1;
+        this.sql.exec('INSERT INTO blocks(k, c, m, n) VALUES(?, ?, NULL, ?)', k, c, playerName);
+        this.sql.exec(
+          'INSERT INTO edits(v, day, ts, p, x, y, z, c, m, n) VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)',
+          version, day, now, r.playerId, wx, wy, wz, c, playerName,
+        );
+        committed.push([wx, wy, wz, c]);
+      }
+      if (version !== this._version) this.setVersion(version);
+      if (committed.length) this.quotaBump('cells:' + iphash, committed.length);
+    });
+    return json({ blocks: committed, version });
   }
 
   // GET /api/admin/builds — token-gated (header x-admin-key === TOKEN_SECRET).
@@ -809,6 +977,7 @@ export class PresenceDO {
           ws, id,
           name: typeof att.name === 'string' ? att.name : FALLBACK_NAME,
           body: Number.isInteger(att.body) ? att.body : 0,
+          uid: typeof att.uid === 'string' ? att.uid : null,
           p: [0, 0, 0], y: 0, a: 0,
           updated: Date.now(),
           connectedAt: Date.now(), joined: true,   // already here pre-wake
@@ -840,7 +1009,7 @@ export class PresenceDO {
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ id, name: FALLBACK_NAME, body: 0 });
     this.peers.set(id, {
-      ws: server, id, name: FALLBACK_NAME, body: 0,
+      ws: server, id, name: FALLBACK_NAME, body: 0, uid: null,
       p: [0, 0, 0], y: 0, a: 0, updated: Date.now(),
       connectedAt: Date.now(), joined: false,
       chatTimes: [], lastText: '', lastTextTs: 0, lastChatAt: 0,
@@ -862,6 +1031,7 @@ export class PresenceDO {
       ws, id,
       name: typeof att.name === 'string' ? att.name : FALLBACK_NAME,
       body: Number.isInteger(att.body) ? att.body : 0,
+      uid: typeof att.uid === 'string' ? att.uid : null,
       p: [0, 0, 0], y: 0, a: 0, updated: Date.now(),
       connectedAt: Date.now(), joined: true,   // healed an existing socket
       chatTimes: [], lastText: '', lastTextTs: 0, lastChatAt: 0,
@@ -883,8 +1053,11 @@ export class PresenceDO {
       peer.name = cleanName(msg.name);
       peer.body = Number.isInteger(msg.body) && msg.body >= 0 && msg.body <= PRESENCE_BODY_MAX
         ? msg.body : 0;
+      // Stable device identity — the roster collapses to one avatar per uid, so
+      // a person's reloads / extra tabs / reconnects don't show up as a crowd.
+      peer.uid = typeof msg.uid === 'string' && msg.uid ? msg.uid.slice(0, 64) : null;
       peer.updated = Date.now();
-      try { ws.serializeAttachment({ id: peer.id, name: peer.name, body: peer.body }); } catch { /* ignore */ }
+      try { ws.serializeAttachment({ id: peer.id, name: peer.name, body: peer.body, uid: peer.uid }); } catch { /* ignore */ }
       // Replay recent chat to this arrival only, then announce them once.
       try { ws.send(JSON.stringify({ t: 'log', msgs: this.chatRing })); } catch { /* socket died */ }
       if (!peer.joined) {
@@ -1040,14 +1213,25 @@ export class PresenceDO {
       return; // empty room: stop scheduling
     }
 
-    // Build the roster: total count is everyone; `av` carries the most-recently
-    // updated, capped, so a packed room stays cheap to send and parse. Closed
-    // sockets are reaped by the close/error handlers and the stale sweep, so the
-    // map is the source of truth here.
-    const peers = [...this.peers.values()];
-    const n = peers.length;
-    peers.sort((a, b) => b.updated - a.updated);
-    const av = peers.slice(0, PRESENCE_AV_CAP).map((peer) => ({
+    // Build the roster, collapsing each stable identity (uid) to a SINGLE
+    // wanderer — the most-recently-updated connection wins, so a person's
+    // reloads / extra tabs / lingering reconnects show up once, not as a crowd.
+    // (Connections with no uid — older clients — are each kept as-is.) The dead
+    // duplicates simply stop appearing and the stale sweep reaps them.
+    const seen = new Map();   // uid -> the live peer we'll show for it
+    const unique = [];
+    for (const peer of this.peers.values()) {
+      if (!peer.uid) { unique.push(peer); continue; }
+      const prev = seen.get(peer.uid);
+      if (!prev) { seen.set(peer.uid, peer); unique.push(peer); }
+      else if (peer.updated > prev.updated) {
+        unique[unique.indexOf(prev)] = peer;
+        seen.set(peer.uid, peer);
+      }
+    }
+    const n = unique.length;
+    unique.sort((a, b) => b.updated - a.updated);
+    const av = unique.slice(0, PRESENCE_AV_CAP).map((peer) => ({
       id: peer.id, name: peer.name, body: peer.body, p: peer.p, y: peer.y, a: peer.a,
     }));
     this.broadcast(JSON.stringify({ t: 'world', n, av }));

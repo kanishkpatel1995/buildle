@@ -507,6 +507,67 @@ function anchorBesidePlayer() {
   return _padAnchor;
 }
 
+// Where an AI build lands as REAL blocks: centred on a spot ahead of the player,
+// clamped so the 24-wide build stays inside the plaza bounds.
+const BUILD_AHEAD = 8;
+function buildAnchorAhead() {
+  const fx = Math.sin(player._yaw), fz = Math.cos(player._yaw);
+  let ox = Math.round(player.position.x + fx * BUILD_AHEAD);
+  let oz = Math.round(player.position.z + fz * BUILD_AHEAD);
+  ox = Math.min(WORLD_MAX - 11, Math.max(WORLD_MIN + 12, ox));
+  oz = Math.min(WORLD_MAX - 11, Math.max(WORLD_MIN + 12, oz));
+  return { ox, oz };
+}
+
+// Grow committed world-blocks into the live world block-by-block (the "rising"
+// effect), bottom-up + outward, paced like the foundry. forcePlace renders them
+// locally; the server already holds them and our own delta echoes are skipped,
+// so there's no double-placement.
+let growQueue = null, growIdx = 0, growAccum = 0, growRate = 140, growPlaced = 0, growResolve = null;
+const GROW_RATE = 140, GROW_MIN_DUR = 2, GROW_MAX_DUR = 6, GROW_MAX_PER_TICK = 64;
+function growBuildInWorld(blocks) {
+  if (growResolve) { const r = growResolve; growResolve = null; r(); }   // settle any orphan
+  const valid = (Array.isArray(blocks) ? blocks : []).filter((b) => b && b.length >= 4);
+  if (!valid.length) return Promise.resolve();
+  let cx = 0, cz = 0;
+  for (const b of valid) { cx += b[0]; cz += b[2]; }
+  cx /= valid.length; cz /= valid.length;
+  valid.sort((a, b) => {
+    if (a[1] !== b[1]) return a[1] - b[1];
+    const da = (a[0] - cx) * (a[0] - cx) + (a[2] - cz) * (a[2] - cz);
+    const db = (b[0] - cx) * (b[0] - cx) + (b[2] - cz) * (b[2] - cz);
+    return da - db;
+  });
+  growQueue = valid; growIdx = 0; growPlaced = 0; growAccum = 0;
+  const dur = Math.min(GROW_MAX_DUR, Math.max(GROW_MIN_DUR, valid.length / GROW_RATE));
+  growRate = valid.length / dur;
+  return new Promise((res) => { growResolve = res; });
+}
+function updateGrow(dt) {
+  if (!growQueue) return;
+  let budget;
+  if (reducedMotion) {
+    budget = growQueue.length - growIdx;
+  } else {
+    growAccum += growRate * dt;
+    budget = growAccum | 0;
+    if (budget > GROW_MAX_PER_TICK) budget = GROW_MAX_PER_TICK;
+    growAccum -= budget;
+  }
+  for (let i = 0; i < budget && growIdx < growQueue.length; i++) {
+    const b = growQueue[growIdx++];
+    if (world.forcePlace(b[0], b[1], b[2], b[3])) {
+      growPlaced++;
+      if (growPlaced % 10 === 0) audio.place();
+      if (growPlaced % 6 === 0) music.notePlaced(b[1], b[3], false);
+    }
+  }
+  if (growIdx >= growQueue.length) {
+    growQueue = null;
+    if (growResolve) { const r = growResolve; growResolve = null; r(); }
+  }
+}
+
 // The Commons (live chat) is available on any island during normal play. The
 // 💬 button and the in-rail toggles open/close it; it rides the per-island
 // presence socket, so what you say is seen by everyone here. Closed while the
@@ -529,19 +590,37 @@ function onChatSend(text, kind) {
   presence.say(text, kind || 'chat');
 }
 
-// /build, typed into the same chat box: dream it up on the API, rise it on the
-// pad beside you, and tell the room what you made (they can't see your pad —
-// the announcement is how the island learns you built something).
+// /build, typed into the same chat box. On the plaza the build lands as REAL,
+// permanent blocks at your feet (synced to everyone, deletable); elsewhere it
+// falls back to the ephemeral preview pad beside you.
 async function onChatBuild(model, prompt) {
   ui.setChatBuildBusy(true);
   ui.chatSys('the builder is dreaming…');
   music.duck();
+  // Permanent builds need the buildable plaza and a synced identity. On the
+  // plaza, give a freshly-loaded session up to ~2s to finish authenticating so
+  // the first build commits for keeps instead of falling back to a preview.
+  const onPlaza = activeWorld === world && world.buildable;
+  let auth = sync.getAuth ? sync.getAuth() : null;
+  for (let i = 0; onPlaza && !auth && i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    auth = sync.getAuth ? sync.getAuth() : null;
+  }
+  const canCommit = onPlaza && !!auth;
+  const anchor = canCommit ? buildAnchorAhead() : null;
   let data;
   try {
+    const reqBody = { model, prompt };
+    if (auth) { reqBody.playerId = auth.playerId; reqBody.token = auth.token; }   // gate needs identity
+    if (canCommit) {
+      reqBody.commit = true;
+      reqBody.ox = anchor.ox;
+      reqBody.oz = anchor.oz;
+    }
     const res = await fetch(API_BASE + '/api/build', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model, prompt }),
+      body: JSON.stringify(reqBody),
     });
     data = await res.json();
   } catch {
@@ -555,12 +634,20 @@ async function onChatBuild(model, prompt) {
     return;
   }
   ui.chatSys(`placing ${data.count} blocks…`);
-  // turn to face the build and ease the camera back so the whole thing frames
-  player._dist = Math.max(player._dist, PAD_VIEW_DIST);
-  await foundry.summon(data.blocks, anchorBesidePlayer());
+  player._dist = Math.max(player._dist, PAD_VIEW_DIST);   // ease the camera back to frame it
   const label = (foundryModels.find((m) => m.id === data.model) || {}).label || 'the builder';
-  ui.chatSys(`“${data.name}” — built by ${label}`);
-  presence.say(`built “${data.name}” · ${label}`, 'build');   // social proof to the room
+  if (data.committed) {
+    // real, permanent build — rises in the shared world, yours to keep
+    await growBuildInWorld(data.blocks);
+    bumpStreak();
+    ui.chatSys(`“${data.name}” — built by ${label} · it's real now (erase to remove)`);
+    presence.say(`built “${data.name}” · ${label}`, 'build');
+  } else {
+    // preview only (off the plaza, or the spot was taken) — the pad beside you
+    await foundry.summon(data.blocks, anchorBesidePlayer());
+    ui.chatSys(`“${data.name}” — a preview; build on the plaza to keep it`);
+    presence.say(`dreamed up “${data.name}” · ${label}`, 'build');
+  }
   ui.setChatBuildBusy(false);
 }
 
@@ -679,6 +766,7 @@ ghost.add(new THREE.LineSegments(
 ));
 ghost.visible = false;
 scene.add(ghost);
+const ERASE_GHOST_COLOR = new THREE.Color('#B5483E');   // brick red — "remove here"
 
 // Sky mode: a maths plane the cursor ray meets (free — never blocks face-picking)
 // plus a faint golden disc that shows where that plane floats and how far you can
@@ -767,6 +855,9 @@ const inBounds = (x, y, z) =>
 
 async function attemptPlace(clientX, clientY) {
   if (views.mode !== 'follow' || voyage.active) return;
+  // Eraser armed: a tap/click removes instead of placing (right-click and
+  // long-press still remove regardless of the selected tool).
+  if (mode === 'erase') { attemptRemove(clientX, clientY); return; }
   // Sky mode swaps face-picking for the floating build-plane; a click on an
   // existing block (to open a note / remove) still works via the normal pick.
   let hit;
@@ -862,6 +953,12 @@ function selectMessageMode() {
   if (messageUsed) return;
   mode = 'message';
   ui.selectSwatch('message');
+  audio.ui();
+}
+
+function selectEraseMode() {
+  mode = 'erase';
+  ui.selectErase();
   audio.ui();
 }
 
@@ -1035,6 +1132,7 @@ window.addEventListener('keydown', (e) => {
   }
   if (key >= '1' && key <= '9') { selectColor(Number(key) - 1); return; }
   if (key === 'm') { selectMessageMode(); return; }
+  if (key === 'e') { selectEraseMode(); return; }
   if (key === 'p') { setViewMode(views.mode === 'photo' ? 'follow' : 'photo'); return; }
   if (key === 'o') setViewMode(views.mode === 'sky' ? 'follow' : 'sky');
 });
@@ -1045,18 +1143,31 @@ function updateGhost(t) {
   let visible = false;
   if (lastPointerType !== 'touch' && pointerInside && !(mouse.down && mouse.dragging) && !contextLost &&
       views.mode === 'follow' && !voyage.active && activeWorld.buildable) {
-    // sky mode previews on the floating plane; ground mode on a block face
-    const cell = skyMode ? skyCell(mouse.x, mouse.y) : null;
-    const hit = skyMode
-      ? (cell && withinSkyReach(cell) ? { placeCell: cell, inRange: true, block: null } : null)
-      : pickAt(mouse.x, mouse.y);
-    if (hit && hit.placeCell && hit.inRange && !(hit.block && hit.block.m)) {
-      const { x, y, z } = hit.placeCell;
-      if (world.canPlace(x, y, z) && !player.overlapsCell(x, y, z)) {
+    if (mode === 'erase') {
+      // a red ghost over the block under the cursor that's removable
+      const hit = pickAt(mouse.x, mouse.y);
+      if (hit && hit.removeCell && hit.inRange &&
+          world.canRemove(hit.removeCell.x, hit.removeCell.y, hit.removeCell.z)) {
+        const { x, y, z } = hit.removeCell;
         ghost.position.set(x + 0.5, y + 0.5, z + 0.5);
-        ghostMat.color.copy(PALETTE_COLORS[mode === 'message' ? GLOW_INDEX : selectedColor]);
-        ghostMat.opacity = reducedMotion ? 0.4 : 0.34 + 0.1 * Math.sin(t * 3);
+        ghostMat.color.copy(ERASE_GHOST_COLOR);
+        ghostMat.opacity = reducedMotion ? 0.45 : 0.4 + 0.12 * Math.sin(t * 4);
         visible = true;
+      }
+    } else {
+      // sky mode previews on the floating plane; ground mode on a block face
+      const cell = skyMode ? skyCell(mouse.x, mouse.y) : null;
+      const hit = skyMode
+        ? (cell && withinSkyReach(cell) ? { placeCell: cell, inRange: true, block: null } : null)
+        : pickAt(mouse.x, mouse.y);
+      if (hit && hit.placeCell && hit.inRange && !(hit.block && hit.block.m)) {
+        const { x, y, z } = hit.placeCell;
+        if (world.canPlace(x, y, z) && !player.overlapsCell(x, y, z)) {
+          ghost.position.set(x + 0.5, y + 0.5, z + 0.5);
+          ghostMat.color.copy(PALETTE_COLORS[mode === 'message' ? GLOW_INDEX : selectedColor]);
+          ghostMat.opacity = reducedMotion ? 0.4 : 0.34 + 0.1 * Math.sin(t * 3);
+          visible = true;
+        }
       }
     }
   }
@@ -1288,6 +1399,7 @@ window.addEventListener('pointerdown', () => ensureAudioAndMusic(), { once: true
 ui.init({
   onSelectColor: selectColor,
   onSelectMessage: selectMessageMode,
+  onSelectErase: selectEraseMode,
   onShare: openShareMenu,
   onToggleSound: () => {
     audio.setMuted(!audio.muted);
@@ -1384,6 +1496,7 @@ function tick() {
   botWorld.update(dt, t);
   gardener.update(dt, t);
   foundry.update(dt, t);
+  updateGrow(dt);   // pace any AI build rising into the live world
   presence.update(dt, t);
   if (presence.count !== lastChatCount) { lastChatCount = presence.count; ui.setChatCount(presence.count); }
   player.update(dt, t);

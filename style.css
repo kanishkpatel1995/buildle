@@ -283,6 +283,21 @@ textarea:focus-visible {
   box-shadow: inset 0 0 0 1px rgba(43, 45, 58, 0.18);
 }
 
+/* eraser — a neutral glass swatch; reads red when armed */
+.erase-slot {
+  display: grid;
+  place-items: center;
+  color: var(--cloud-white);
+  background: rgba(43, 29, 58, 0.42);
+  box-shadow: inset 0 0 0 1px var(--glass-border);
+}
+.erase-slot svg { width: 19px; height: 19px; }
+.erase-slot.selected {
+  color: #fff;
+  background: var(--brick-red);
+  box-shadow: 0 0 0 2px var(--cloud-white), 0 6px 14px rgba(24, 14, 38, 0.4);
+}
+
 /* ── Action buttons ────────────────────────────────────────────────────── */
 #actions {
   position: fixed;

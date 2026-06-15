@@ -23,6 +23,7 @@ import { audio } from './audio.js';
 
 const DEFAULT_API = 'https://buildle-api.buildle.workers.dev';
 const API_KEY = 'buildle_api_v1';
+const DEVICE_KEY = 'buildle_device_v1';     // stable identity (shared with sync.js)
 
 const SEND_EVERY_MS = 1000;                 // 1Hz state cadence (contract)
 const BACKOFF_MS = [5000, 15000, 30000];    // reconnect ladder — capped, forever
@@ -63,6 +64,17 @@ function lsGet(key) {
   try { return window.localStorage.getItem(key); } catch { return null; }
 }
 
+// Stable per-browser identity (the same device id sync.js uses). Lets the server
+// collapse a person's many connections — reloads, extra tabs, reconnects — into a
+// single wanderer instead of a crowd of duplicates.
+function deviceUid() {
+  let id = lsGet(DEVICE_KEY);
+  if (!id) {
+    try { id = crypto.randomUUID(); window.localStorage.setItem(DEVICE_KEY, id); } catch { id = ''; }
+  }
+  return id || '';
+}
+
 // ── the adapter ──────────────────────────────────────────────────────────────
 
 export function createPresence({ scene, reducedMotion = false }) {
@@ -100,13 +112,13 @@ export function createPresence({ scene, reducedMotion = false }) {
     // Same island, live socket: just refresh identity/state source.
     if (nextIsland === island && ws &&
         (ws.readyState === 0 || ws.readyState === 1)) {
-      helloPayload = { name: String(opts.name ?? ''), body: opts.body | 0 };
+      helloPayload = { name: String(opts.name ?? ''), body: opts.body | 0, uid: deviceUid() };
       getState = opts.getState;
       return;
     }
     teardown(true);             // fade out the previous room's wanderers
     island = nextIsland;
-    helloPayload = { name: String(opts.name ?? ''), body: opts.body | 0 };
+    helloPayload = { name: String(opts.name ?? ''), body: opts.body | 0, uid: deviceUid() };
     getState = opts.getState;
     backoffStep = 0;
     open();
@@ -126,7 +138,7 @@ export function createPresence({ scene, reducedMotion = false }) {
       sock.onopen = () => {
         if (sock !== ws) return;
         backoffStep = 0;
-        safeSend({ t: 'hello', name: helloPayload.name, body: helloPayload.body });
+        safeSend({ t: 'hello', name: helloPayload.name, body: helloPayload.body, uid: helloPayload.uid });
         sendState();            // first state right away
         clearInterval(sendTimer);
         sendTimer = setInterval(sendState, SEND_EVERY_MS);

@@ -29,6 +29,13 @@ const ENVELOPE_SVG =
   '<rect x="1.6" y="3.4" width="12.8" height="9.2" rx="1.6"/>' +
   '<path d="m2.4 4.6 5.6 4.2 5.6-4.2"/></svg>';
 
+// a chunky eraser nib, tilted
+const ERASER_SVG =
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<path d="M6.3 13.2 2.6 9.5a1.4 1.4 0 0 1 0-2l5-5a1.4 1.4 0 0 1 2 0l3.8 3.8a1.4 1.4 0 0 1 0 2l-4.8 4.9Z"/>' +
+  '<path d="M5.8 5.6 10.4 10.2"/><path d="M6.3 13.2h7"/></svg>';
+
 const $ = (id) => document.getElementById(id);
 
 let promptTextEl, dayLineEl, paletteEl, soundBtn;
@@ -245,6 +252,7 @@ function cssEscape(s) {
 let swatchEls = [];
 let brushEls = [];
 let messageSlotEl = null;
+let eraseSlotEl = null;
 let openMenuCleanup = null;
 
 let currentDay = 0;
@@ -266,6 +274,7 @@ function renderDayLine() {
 function applySelection(sel) {
   swatchEls.forEach((el, i) => el.classList.toggle('selected', sel === i));
   messageSlotEl.classList.toggle('selected', sel === 'message');
+  if (eraseSlotEl) eraseSlotEl.classList.toggle('selected', sel === 'erase');
 }
 
 function nextToast() {
@@ -416,7 +425,7 @@ function drawCardOverlay(ctx, { day, prompt, name, streak }) {
 // ── Public API ──────────────────────────────────────────────────────────
 
 export const ui = {
-  init({ onSelectColor, onSelectMessage, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView, onChat, onSky, onBuildY, onBrush, onMusicMode }) {
+  init({ onSelectColor, onSelectMessage, onSelectErase, onShare, onToggleSound, onHelp, onViews, onCompass, onExitView, onChat, onSky, onBuildY, onBrush, onMusicMode }) {
     promptTextEl = $('prompt-text');
     dayLineEl = $('day-line');
     paletteEl = $('palette');
@@ -481,6 +490,20 @@ export const ui = {
     });
     paletteEl.appendChild(messageSlotEl);
 
+    // Eraser — tap it, then tap/click blocks to remove them (right-click /
+    // long-press still work too). Lives between the note slot and the brushes.
+    eraseSlotEl = document.createElement('button');
+    eraseSlotEl.type = 'button';
+    eraseSlotEl.className = 'swatch erase-slot';
+    eraseSlotEl.title = 'erase blocks';
+    eraseSlotEl.setAttribute('aria-label', 'erase blocks');
+    eraseSlotEl.innerHTML = ERASER_SVG;
+    eraseSlotEl.addEventListener('click', () => {
+      applySelection('erase');
+      if (onSelectErase) onSelectErase();
+    });
+    paletteEl.appendChild(eraseSlotEl);
+
     // Brush size — single / 2×2×2 / 3×3 blob, for clouds and big masses. Rides
     // the end of the palette row (scrolls with it on phones).
     brushEls = [1, 2, 3].map((n) => {
@@ -542,6 +565,10 @@ export const ui = {
 
   selectSwatch(i) {
     applySelection(i);
+  },
+
+  selectErase() {
+    applySelection('erase');
   },
 
   selectBrush(n) {

@@ -323,5 +323,9 @@ export function createSync({ world, getName, onRemoteEdit, onDenied, onDay, onSt
     });
   }
 
-  return { active, start, sendPlace, sendRemove, setName, flush };
+  return {
+    active, start, sendPlace, sendRemove, setName, flush,
+    // identity for the AI-build commit path (null until hello completes)
+    getAuth: () => (playerId && token ? { playerId, token } : null),
+  };
 }
