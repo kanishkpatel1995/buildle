@@ -61,7 +61,7 @@
           <polygon points="13.22 6.78 11.61 11.61 6.78 13.22 8.39 8.39" fill="currentColor" stroke="none" />
         </svg>
       </button>
-      <button id="btn-chat" class="round-btn" type="button" title="live chat — talk &amp; build" aria-label="live chat">
+      <button id="btn-chat" class="round-btn" type="button" title="live chat — talk &amp; build" aria-label="live chat" aria-controls="chat" aria-expanded="false">
         <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M3.4 5.6A1.6 1.6 0 0 1 5 4h10a1.6 1.6 0 0 1 1.6 1.6v5.6A1.6 1.6 0 0 1 15 12.8H8.2L4.8 15.6v-2.8H5a1.6 1.6 0 0 1-1.6-1.6Z" />
           <path d="M6.6 7.4h6.8M6.6 9.8h4.2" />
@@ -118,11 +118,6 @@
   <!-- The Commons: one live chat. Talk to the island, or type /build to make
        something. Rides the per-island presence socket. -->
   <div id="chat" aria-label="island chat">
-    <button id="chat-tab" type="button" aria-label="show chat" title="show chat">
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3.4 5.6A1.6 1.6 0 0 1 5 4h10a1.6 1.6 0 0 1 1.6 1.6v5.6A1.6 1.6 0 0 1 15 12.8H8.2L4.8 15.6v-2.8H5a1.6 1.6 0 0 1-1.6-1.6Z" />
-      </svg>
-    </button>
     <div id="chat-head">
       <span id="chat-count" class="chat-count">live</span>
       <button id="chat-collapse" type="button" aria-label="hide chat" title="hide chat">

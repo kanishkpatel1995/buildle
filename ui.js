@@ -43,7 +43,7 @@ let arrivalTimer = 0;
 
 // ── the Commons (live chat) ──────────────────────────────────────────────
 let chatEl, chatFeedEl, chatInputEl, chatBuildEl, chatGearEl, chatModelEl;
-let chatAcEl, chatSuggestEl, chatCountEl, chatUnreadEl;
+let chatAcEl, chatSuggestEl, chatCountEl;
 let chatOnSend = null, chatOnBuild = null, chatOnReport = null, chatOnExpand = null;
 let chatExpanded = false;
 let chatBuildBusy = false;
@@ -149,6 +149,19 @@ function clearChatUnread() {
   if (b) b.classList.remove('has-unread');
 }
 
+// Reflect open/hidden state on the two toggle controls (screen-reader + title).
+function syncChatToggleAria() {
+  const b = $('btn-chat');
+  if (b) {
+    b.setAttribute('aria-expanded', String(chatExpanded));
+    const label = chatExpanded ? 'hide chat' : 'live chat';
+    b.setAttribute('aria-label', label);
+    b.title = chatExpanded ? 'hide chat' : 'live chat — talk & build';
+  }
+  const c = $('chat-collapse');
+  if (c) c.setAttribute('aria-expanded', String(chatExpanded));
+}
+
 // Slash-command autocomplete, filtered by the typed prefix.
 function showChatAc(prefix) {
   if (!chatAcEl) return;
@@ -210,15 +223,20 @@ function restoreChatPlaceholder() {
 }
 
 // Keep the expanded sheet's composer above the on-screen keyboard (phones).
+// No-ops (and resets) when the chat isn't an open sheet, or when a modal overlay
+// owns the screen — otherwise two inputs would fight over the inset.
 function syncChatViewport() {
   if (!chatEl || !window.visualViewport) return;
-  if (!chatExpanded || !matchMedia('(max-width: 759px)').matches) {
+  const overlayOpen = !!document.querySelector('.overlay:not(.hidden)');
+  if (!chatExpanded || overlayOpen || !matchMedia('(max-width: 759px)').matches) {
     chatEl.style.bottom = '';
     return;
   }
   const vv = window.visualViewport;
   const overlap = Math.max(0, window.innerHeight - (vv.height + vv.offsetTop));
-  chatEl.style.bottom = overlap + 'px';
+  // keep a minimum visible slice so the sheet never gets shoved fully off-screen
+  const maxShift = Math.max(0, window.innerHeight - 200);
+  chatEl.style.bottom = Math.min(overlap, maxShift) + 'px';
 }
 
 function cssEscape(s) {
@@ -718,7 +736,6 @@ export const ui = {
     chatAcEl = $('chat-ac');
     chatSuggestEl = $('chat-suggest');
     chatCountEl = $('chat-count');
-    chatUnreadEl = $('chat-unread');
     chatOnSend = onSend;
     chatOnBuild = onBuild;
     chatOnReport = onReport;
@@ -811,9 +828,8 @@ export const ui = {
       doBuild(subject);
     });
 
-    // collapse / reopen / peek-to-expand all route through toggleChat
+    // the in-rail chevron hides the chat; the 💬 action button reopens it
     $('chat-collapse').addEventListener('click', () => ui.toggleChat(false));
-    $('chat-tab').addEventListener('click', () => ui.toggleChat(true));
     chatFeedEl.addEventListener('click', (e) => {
       const rep = e.target.closest('.rep');
       if (rep) {
@@ -823,10 +839,7 @@ export const ui = {
           row.classList.add('reported');
           rep.textContent = 'reported';
         }
-        return;
       }
-      // tapping the peek (phones, collapsed) opens the sheet
-      if (!chatExpanded) ui.toggleChat(true);
     });
 
     // keep the composer above the on-screen keyboard (phones)
@@ -837,15 +850,18 @@ export const ui = {
 
     chatExpanded = !!expanded;
     document.body.classList.toggle('chat-expanded', chatExpanded);
-    if (!chatExpanded) startChatPlaceholder();
+    syncChatToggleAria();
+    startChatPlaceholder();
   },
 
-  // Toggle the rail open/closed (desktop) or the sheet/peek (phones).
+  // Toggle the chat between shown and fully hidden. The 💬 action button and the
+  // in-rail chevron both call this; hidden = #chat display:none, reopened via 💬.
   toggleChat(force) {
     const next = typeof force === 'boolean' ? force : !chatExpanded;
-    if (next === chatExpanded) { if (next) chatInputEl && chatInputEl.focus(); return; }
+    if (next === chatExpanded) return;
     chatExpanded = next;
     document.body.classList.toggle('chat-expanded', chatExpanded);
+    syncChatToggleAria();
     audio.ui();
     if (chatExpanded) {
       clearChatUnread();
@@ -854,6 +870,7 @@ export const ui = {
       scrollChatToEnd();
     } else if (chatInputEl) {
       chatInputEl.blur();
+      if (chatEl) chatEl.style.bottom = '';   // drop any stale keyboard offset
     }
     if (chatOnExpand) chatOnExpand(chatExpanded);
     return chatExpanded;

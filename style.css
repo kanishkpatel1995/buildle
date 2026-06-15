@@ -1039,8 +1039,8 @@ body.filming #chat {
   vertical-align: middle;
 }
 
-#chat-collapse,
-#chat-tab {
+/* the hide control — a chevron in the rail head; the 💬 action button reopens */
+#chat-collapse {
   display: grid;
   place-items: center;
   width: 28px;
@@ -1051,24 +1051,8 @@ body.filming #chat {
   pointer-events: auto;
   transition: background 150ms ease;
 }
-#chat-collapse:hover,
-#chat-tab:hover { background: rgba(43, 29, 58, 0.55); }
-#chat-collapse svg,
-#chat-tab svg { width: 16px; height: 16px; }
-
-/* The reopen tab — only visible while the rail is collapsed. */
-#chat-tab {
-  position: absolute;
-  top: 0;
-  right: var(--space-2);
-  width: 36px;
-  height: 36px;
-  display: none;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border: 1px solid var(--glass-border);
-}
-#chat-tab svg { width: 18px; height: 18px; }
+#chat-collapse:hover { background: rgba(43, 29, 58, 0.55); }
+#chat-collapse svg { width: 16px; height: 16px; }
 
 /* ── the feed ── */
 #chat-feed {
@@ -1281,69 +1265,84 @@ body.filming #chat {
 #chat-suggest.hidden,
 #chat-model.hidden { display: none; }
 
-/* ── desktop: collapse the rail to a tab ── */
+/* ── desktop: the rail is shown (chat-expanded) or fully hidden ── */
 @media (min-width: 760px) {
-  body:not(.chat-expanded) #chat {
-    pointer-events: none;
-    background: none;
-  }
-  body:not(.chat-expanded) #chat-head,
-  body:not(.chat-expanded) #chat-feed,
-  body:not(.chat-expanded) #chat-compose { display: none; }
-  body:not(.chat-expanded) #chat-tab { display: grid; }
+  /* hidden = gone; the 💬 action button (with its unread dot) reopens it */
+  body:not(.chat-expanded) #chat { display: none; }
 
-  /* when the rail is open, slide the action buttons clear of it and
-     re-center the palette in the remaining width */
+  /* when the rail is open it owns the right 340px; confine every other piece of
+     HUD to the region LEFT of it so nothing slides under the rail or collides
+     with the relocated action column */
+  /* the rail owns the right 340px; the 44px action column tucks just left of it */
   body.chat-expanded #actions { right: calc(340px + var(--space-2)); }
+  body.chat-expanded .mini-menu { right: calc(340px + var(--space-2)); }
+  /* palette fills the bottom band LEFT of the action column (reserve 340 rail +
+     44 actions + gaps); left-packed and scrollable so it never reaches them */
   body.chat-expanded #palette {
-    left: calc((100% - 340px) / 2);
+    left: var(--space-2);
+    right: calc(340px + 44px + var(--space-3));
+    transform: none;
+    max-width: none;
+    /* a right-edge fade signals the clipped, scrollable run (lifted at the end) */
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0, 0, 0, 0.08));
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), rgba(0, 0, 0, 0.08));
+  }
+  body.chat-expanded #palette.at-end {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  /* prompt pill centers in the band BETWEEN the logo (~110px) and the rail */
+  body.chat-expanded #prompt-pill {
+    left: calc((100% - 230px) / 2);
+    max-width: min(620px, calc(100vw - 470px));
+  }
+  body.chat-expanded #sky-bar { left: calc((100% - 384px) / 2); }
+  body.chat-expanded #toast {
+    left: calc((100% - 384px) / 2);
+    max-width: min(86vw, calc(100vw - 440px));
   }
 }
 
-/* ── phones: a peek above play that taps open to a sheet ── */
+/* ── phones: chat is hidden, or an open bottom sheet (no always-on peek) ── */
 @media (max-width: 759px) {
   #chat {
     left: 0;
     right: 0;
     width: auto;
-    top: calc(86px + env(safe-area-inset-top, 0px));
-    bottom: auto;
-    height: 96px;                /* ~3 lines of peek */
-    background: none;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 70%, transparent 100%);
-    mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 70%, transparent 100%);
-  }
-  /* peek mode: feed only, non-interactive, composer + head hidden */
-  body:not(.chat-expanded) #chat { pointer-events: none; }
-  body:not(.chat-expanded) #chat-head,
-  body:not(.chat-expanded) #chat-compose { display: none; }
-  body:not(.chat-expanded) #chat-feed { pointer-events: none; padding-left: var(--space-2); }
-  body:not(.chat-expanded) .chat-row .rep { display: none; }
-
-  /* expanded mode: a bottom sheet that rides above the keyboard */
-  body.chat-expanded #chat {
     top: auto;
     bottom: 0;
     height: 62svh;
     max-height: 62svh;
+    min-height: 240px;
     padding-top: var(--space-1);
+    pointer-events: auto;        /* the sheet captures taps (not click-through) */
     background: linear-gradient(to bottom,
       rgba(43, 29, 58, 0) 0%,
       rgba(40, 25, 56, 0.5) 24%,
       rgba(30, 18, 46, 0.86) 100%);
-    -webkit-mask-image: none;
-    mask-image: none;
-    pointer-events: auto;
   }
-  body.chat-expanded #chat-feed {
+  body:not(.chat-expanded) #chat { display: none; }   /* hidden — reopen via 💬 */
+  #chat-feed {
     -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 12%);
     mask-image: linear-gradient(to bottom, transparent 0, #000 12%);
   }
-  #chat-tab { display: none !important; }   /* phones use the 💬 action button */
+  /* the composer clears the home indicator; padding (not bottom) survives the
+     keyboard inset that syncChatViewport writes to #chat's inline bottom */
+  #chat-compose { padding-bottom: calc(var(--space-1) + env(safe-area-inset-bottom, 0px)); }
+  #chat-input { font-size: 16px; }   /* ≥16px stops iOS auto-zoom on focus */
 
-  /* the peek must never sit under the action buttons / prompt pill */
+  /* the open sheet owns the bottom — fade the build chrome (incl. sky controls) */
   body.chat-expanded #actions,
-  body.chat-expanded #palette { opacity: 0; pointer-events: none; }
+  body.chat-expanded #palette,
+  body.chat-expanded #sky-bar { opacity: 0; pointer-events: none; }
+}
+
+/* landscape phones: the 62svh sheet is too short — take the full height, and
+   (since it now covers the top too) fold away the logo + prompt pill */
+@media (max-width: 759px) and (orientation: landscape) {
+  body.chat-expanded #chat { height: 100svh; max-height: 100svh; min-height: 0; }
+  body.chat-expanded #logo,
+  body.chat-expanded #prompt-pill { opacity: 0; pointer-events: none; }
 }
 
 /* live chat hides while another mode owns the screen. */

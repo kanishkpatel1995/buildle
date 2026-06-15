@@ -1209,6 +1209,7 @@ function compassFlow() {
     return;
   }
   if (views.mode !== 'follow') setViewMode('follow');
+  if (ui.chatExpanded) ui.toggleChat(false);   // leave the voyage with a clean, deterministic HUD
   voyage.open();
 }
 
