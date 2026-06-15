@@ -53,6 +53,7 @@ const PRESENCE_BODY_MAX = 63;    // palette colour index ceiling (generous)
 // --- live chat (rides the same per-island presence socket) ---
 const CHAT_MAX = 240;            // chars per line after sanitising
 const CHAT_RING = 50;            // recent lines replayed to a new arrival
+const CHAT_PERSIST = 400;        // lines kept durably per island (survive reload/eviction)
 const CHAT_WINDOW_MS = 10000;    // rolling rate-limit window
 const CHAT_BURST = 8;            // most lines allowed inside that window
 const CHAT_GAP_MS = 600;         // floor between two consecutive lines
@@ -943,11 +944,25 @@ export class PresenceDO {
     // with the 1Hz alarm pending — never hibernates).
     this.peers = new Map();
     this.seq = 0;
-    // Live chat: a small ring of recent lines (replayed to new arrivals), a
-    // monotonic message counter for stable ids, and a report tally per line.
+    // Live chat: a ring of recent lines (replayed to new arrivals) and a report
+    // tally per line. PresenceDO is SQLite-backed, so the history is DURABLE —
+    // it survives reloads, island changes, and DO eviction. The in-memory ring
+    // is just a warm cache loaded from that store here on (re)construction.
     this.chatRing = [];
     this.msgSeq = 0;
     this.reports = new Map();   // mid -> Set(reporterId)
+    try {
+      this.sql = ctx.storage.sql;
+      this.sql.exec('CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT, name TEXT, text TEXT, kind TEXT, ts INTEGER)');
+      const rows = this.sql.exec(
+        'SELECT mid, name, text, kind, ts FROM chat ORDER BY id DESC LIMIT ?', CHAT_RING,
+      ).toArray().reverse();
+      this.chatRing = rows.map((r) => ({ t: 'msg', mid: r.mid, id: '', name: r.name, text: r.text, kind: r.kind, ts: r.ts }));
+      const mx = this.sql.exec('SELECT MAX(id) AS m FROM chat').toArray()[0];
+      this.msgSeq = (mx && mx.m) ? mx.m : 0;
+    } catch {
+      this.sql = null;   // storage unavailable — fall back to in-memory only
+    }
     // Idle keepalives (ping/pong) are answered without waking the DO.
     try {
       ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
@@ -1134,10 +1149,18 @@ export class PresenceDO {
   // Stamp a chat line with a room-unique id, keep it in the replay ring, and fan
   // it out to everyone (including the sender, so their own line confirms).
   emitMsg(peer, text, kind) {
-    const mid = peer.id + '-' + (this.msgSeq++).toString(36);
-    const out = { t: 'msg', mid, id: peer.id, name: peer.name, text, kind, ts: Date.now() };
+    const ts = Date.now();
+    const mid = peer.id + '-' + (++this.msgSeq).toString(36);
+    const out = { t: 'msg', mid, id: peer.id, name: peer.name, text, kind, ts };
     this.chatRing.push(out);
     if (this.chatRing.length > CHAT_RING) this.chatRing.shift();
+    // persist (durable across reloads/eviction), pruning to the last CHAT_PERSIST
+    if (this.sql) {
+      try {
+        this.sql.exec('INSERT INTO chat(mid, name, text, kind, ts) VALUES(?,?,?,?,?)', mid, peer.name, text, kind, ts);
+        this.sql.exec('DELETE FROM chat WHERE id <= (SELECT MAX(id) FROM chat) - ?', CHAT_PERSIST);
+      } catch { /* best-effort; the in-memory ring still serves */ }
+    }
     this.broadcast(JSON.stringify(out));
   }
 
@@ -1188,6 +1211,7 @@ export class PresenceDO {
     set.add(peer.id);
     if (set.size >= CHAT_REPORT_HIDE) {
       this.chatRing = this.chatRing.filter((m) => m.mid !== mid);  // no replay
+      if (this.sql) { try { this.sql.exec('DELETE FROM chat WHERE mid = ?', mid); } catch { /* */ } }
       this.broadcast(JSON.stringify({ t: 'hide', mid }));
       this.reports.delete(mid);
     }
