@@ -150,17 +150,72 @@ function helloThrottled(ip) {
 // is client-local, so no world state is touched — we just turn a prompt into a
 // validated list of blocks for the client to animate into place. ---
 
-// The curated model lineup (verified live on OpenRouter). Order = dropdown
-// order; the first is the default. label/blurb are shown in the UI.
+// The curated featured lineup (verified live on OpenRouter, 5 labs). Order = list
+// order; the first is the cost-safe DEFAULT (free). tier drives the premium cap.
+// Players can also search the whole OpenRouter catalog (see modelsList()).
 const BUILD_MODELS = [
-  { id: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', blurb: 'quick and clever' },
-  { id: 'google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', blurb: 'google, balanced' },
-  { id: 'google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', blurb: 'feather-light' },
-  { id: 'openai/gpt-5.4-nano', label: 'GPT-5.4 Nano', blurb: 'openai, tiny' },
-  { id: 'openai/gpt-4.1-mini', label: 'GPT-4.1 Mini', blurb: 'openai, steady' },
-  { id: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5', blurb: 'anthropic, tasteful' },
+  { id: 'anthropic/claude-haiku-4.5', label: 'The Sprinter', blurb: 'fast, reliable — a great start', tier: 'cheap' },
+  { id: 'anthropic/claude-opus-4.8', label: 'The Architect', blurb: 'frontier polish, rock-solid ✦', tier: 'premium' },
+  { id: 'openai/gpt-5.5', label: 'The Showrunner', blurb: 'bold, ambitious layouts', tier: 'premium' },
+  { id: 'google/gemini-3.5-flash', label: 'The Speedrunner', blurb: 'builds almost instantly', tier: 'mid' },
+  { id: 'x-ai/grok-4.3', label: 'The Wildcard', blurb: 'loose & chaotic — roast it', tier: 'mid' },
+  { id: 'qwen/qwen3.7-max', label: 'The Engineer', blurb: 'precise & symmetric (a touch slow)', tier: 'mid' },
+  { id: 'openai/gpt-5.4-mini', label: 'The Apprentice', blurb: 'clean, literal & cheap', tier: 'cheap' },
+  { id: 'deepseek/deepseek-v4-flash', label: 'The Quick One', blurb: 'tiny, quick & clever', tier: 'cheap' },
+  { id: 'qwen/qwen3-coder:free', label: 'The Volunteer', blurb: 'free · sometimes busy', tier: 'free' },
+  { id: 'openai/gpt-oss-120b:free', label: 'The Open One', blurb: 'free · a different flavour', tier: 'free' },
 ];
 const BUILD_MODEL_IDS = new Set(BUILD_MODELS.map((m) => m.id));
+const BUILD_MODEL_TIER = new Map(BUILD_MODELS.map((m) => [m.id, m.tier]));
+// A model is "premium" (subject to the tighter daily sub-cap) if it's a featured
+// premium pick OR anything NOT in the featured cheap/free/mid set — i.e. any
+// exotic model chosen via search defaults to the capped tier.
+function isPremiumModel(id) {
+  const t = BUILD_MODEL_TIER.get(id);
+  return t ? t === 'premium' : true;
+}
+// Accept the featured ids, or any well-formed OpenRouter id (provider/model[:tag])
+// chosen via search; anything else falls back to the free default.
+function resolveModel(raw) {
+  if (typeof raw === 'string') {
+    if (BUILD_MODEL_IDS.has(raw)) return raw;
+    if (raw.length <= 80 && /^[\w.-]+\/[\w.:-]+$/.test(raw)) return raw;
+  }
+  return BUILD_MODELS[0].id;
+}
+
+// Cached OpenRouter catalog (text-output chat models) for the search picker.
+// Refetched at most every ~30 min per isolate; image/audio/embedding skipped.
+let _catalog = null;
+let _catalogAt = 0;
+const CATALOG_TTL_MS = 1800000;
+async function openRouterCatalog(env) {
+  const now = Date.now();
+  if (_catalog && now - _catalogAt < CATALOG_TTL_MS) return _catalog;
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: env.OPENROUTER_API_KEY ? { Authorization: `Bearer ${env.OPENROUTER_API_KEY}` } : {},
+    });
+    if (!res.ok) return _catalog || [];
+    const data = await res.json().catch(() => null);
+    const list = data && Array.isArray(data.data) ? data.data : [];
+    const out = [];
+    for (const m of list) {
+      const id = typeof m.id === 'string' ? m.id : '';
+      if (!id || id.startsWith('~')) continue;   // skip the "-latest" alias rows
+      const outMods = m.architecture && Array.isArray(m.architecture.output_modalities)
+        ? m.architecture.output_modalities : null;
+      if (outMods && !outMods.includes('text')) continue;
+      if (/image|audio|tts|embedding|moderation|rerank|whisper|sora/i.test(id)) continue;
+      out.push({ id, label: typeof m.name === 'string' ? m.name : id });
+    }
+    _catalog = out;
+    _catalogAt = now;
+    return out;
+  } catch {
+    return _catalog || [];
+  }
+}
 
 const BUILD_ENVELOPE = 24;        // builds fit in a 24×24×24 box, origin corner (0,0,0)
 const BUILD_CENTER = 12;          // builds are centred on x,z = 12 in that box
@@ -172,7 +227,8 @@ const BUILD_PER_HOUR = 40;        // per-IP, soft (isolate-local) — the real c
 // Persistent daily ceilings (in the plaza DO's SQLite — survive isolate recycling
 // and IP/identity rotation), checked BEFORE the paid model call. The global cap
 // is the hard bill ceiling; the per-player/per-IP caps bound any one actor.
-const BUILD_GLOBAL_DAILY = 3000;  // total model calls/day — the cost ceiling
+const BUILD_GLOBAL_DAILY = 3000;  // total model calls/day — the overall ceiling
+const BUILD_PREMIUM_DAILY = 300;  // tighter sub-cap on premium/exotic models (the costly ones)
 const BUILD_PLAYER_DAILY = 40;    // builds/day per identity
 const BUILD_IP_DAILY = 60;        // builds/day per IP (catches identity rotation)
 // Committing an AI build into the shared world (the plaza): how many cells one
@@ -306,7 +362,7 @@ async function aiBuild(request, env, ctx) {
   const body = await readJson(request);
   if (!body) return json({ error: 'bad request' }, 400);
 
-  const model = BUILD_MODEL_IDS.has(body.model) ? body.model : BUILD_MODELS[0].id;
+  const model = resolveModel(body.model);
   const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
   if (prompt.length < 1) return json({ error: 'tell the builder what to make' }, 400);
   if (prompt.length > BUILD_PROMPT_MAX) return json({ error: 'keep the request short and sweet' }, 400);
@@ -326,7 +382,7 @@ async function aiBuild(request, env, ctx) {
     const gr = await stub.fetch('https://do.internal/internal/buildgate', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ playerId: body.playerId, token: body.token, iphash }),
+      body: JSON.stringify({ playerId: body.playerId, token: body.token, iphash, premium: isPremiumModel(model) }),
     });
     const gate = await gr.json().catch(() => null);
     if (!gate || !gate.ok) {
@@ -334,6 +390,7 @@ async function aiBuild(request, env, ctx) {
       logResult(false, 0, 'gate-' + reason);
       if (reason === 'auth') return json({ error: 'reconnecting — try again in a moment' }, 401);
       if (reason === 'busy') return json({ error: 'the foundry hit its limit for today — back tomorrow' }, 429);
+      if (reason === 'premium') return json({ error: 'the premium models are resting for today — try a free one' }, 429);
       return json({ error: 'building a lot — give it a little while' }, 429);
     }
   } catch {
@@ -360,7 +417,11 @@ async function aiBuild(request, env, ctx) {
       { role: 'user', content: prompt },
     ],
     temperature: 0.8,
-    max_tokens: 2000,
+    // The build JSON (up to 96 ops) runs ~3-4k tokens once a model pretty-prints
+    // it — 2000 truncates mid-array and fails to parse. 4096 fits a full build
+    // with margin; it's only a CEILING (you bill actual output), and the daily
+    // gate is the real cost control, so this doesn't raise normal-build cost.
+    max_tokens: 4096,
   };
 
   // Try with json_object mode first; if a provider rejects it, retry once on
@@ -438,7 +499,11 @@ export default {
       return await aiBuild(request, env, ctx);
     }
     if (url.pathname === '/api/models' && request.method === 'GET') {
-      return json({ models: BUILD_MODELS });
+      const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+      if (!q) return json({ models: BUILD_MODELS, featured: true });
+      const all = await openRouterCatalog(env);
+      const hits = all.filter((m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q)).slice(0, 40);
+      return json({ models: hits, featured: false });
     }
     if (url.pathname === '/api/presence') {
       const island = url.searchParams.get('island') || '';
@@ -621,11 +686,14 @@ export class IslandDO {
     if (!r) return json({ ok: false, reason: 'bad' }, 400);
     if (!(await this.verify(r.playerId, r.token))) return json({ ok: false, reason: 'auth' }, 401);
     const iphash = typeof r.iphash === 'string' ? r.iphash.slice(0, 64) : 'noip';
+    const premium = r.premium === true;
     if (this.quotaGet('g') >= BUILD_GLOBAL_DAILY) return json({ ok: false, reason: 'busy' }, 429);
+    if (premium && this.quotaGet('pg') >= BUILD_PREMIUM_DAILY) return json({ ok: false, reason: 'premium' }, 429);
     if (this.quotaGet('p:' + r.playerId) >= BUILD_PLAYER_DAILY) return json({ ok: false, reason: 'player' }, 429);
     if (this.quotaGet('ip:' + iphash) >= BUILD_IP_DAILY) return json({ ok: false, reason: 'ip' }, 429);
     this.ctx.storage.transactionSync(() => {
       this.quotaBump('g');
+      if (premium) this.quotaBump('pg');
       this.quotaBump('p:' + r.playerId);
       this.quotaBump('ip:' + iphash);
     });

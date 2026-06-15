@@ -51,6 +51,11 @@ let arrivalTimer = 0;
 // ── the Commons (live chat) ──────────────────────────────────────────────
 let chatEl, chatFeedEl, chatInputEl, chatBuildEl, chatGearEl, chatModelEl;
 let chatAcEl, chatSuggestEl, chatCountEl;
+let chatModelInputEl, chatModelListEl, chatOnModelSearch = null;
+let chatFeaturedModels = [];
+let chatModelSearchTimer = 0;
+let selectedModelId = '';
+let selectedModelLabel = '';
 let chatOnSend = null, chatOnBuild = null, chatOnReport = null, chatOnExpand = null;
 let chatExpanded = false;
 let chatBuildBusy = false;
@@ -208,6 +213,53 @@ function hideChatSuggest() {
   if (chatSuggestEl) chatSuggestEl.classList.add('hidden');
   clearTimeout(chatSuggestTimer);
   chatSuggestTimer = 0;
+}
+
+// ── model picker (searchable combobox) ──
+function renderModelList(list, q) {
+  if (!chatModelListEl) return;
+  const items = (list || []).slice(0, 40);
+  chatModelListEl.replaceChildren(...items.map((m) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chat-model-item' + (m.id === selectedModelId ? ' sel' : '');
+    b.setAttribute('role', 'option');
+    const lab = document.createElement('span'); lab.className = 'ml-label'; lab.textContent = m.label || m.id;
+    const sub = document.createElement('span'); sub.className = 'ml-sub'; sub.textContent = m.blurb || m.id;
+    b.append(lab, sub);
+    b.addEventListener('mousedown', (e) => e.preventDefault());   // don't blur the input
+    b.addEventListener('click', () => { selectChatModel(m); closeModelPicker(); });
+    return b;
+  }));
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'chat-model-empty';
+    e.textContent = q ? 'no models match' : '…';
+    chatModelListEl.appendChild(e);
+  }
+}
+function selectChatModel(m) {
+  if (!m || !m.id) return;
+  selectedModelId = m.id;
+  selectedModelLabel = m.label || m.id;
+  if (chatModelInputEl) chatModelInputEl.placeholder = selectedModelLabel;
+  if (chatGearEl) chatGearEl.title = 'builder: ' + selectedModelLabel;
+}
+function openModelPicker() {
+  if (!chatModelEl) return;
+  chatModelEl.classList.remove('hidden');
+  if (chatGearEl) chatGearEl.classList.add('on');
+  if (chatModelInputEl) {
+    chatModelInputEl.value = '';
+    renderModelList(chatFeaturedModels);
+    requestAnimationFrame(() => chatModelInputEl.focus());
+  }
+}
+function closeModelPicker() {
+  if (chatModelEl) chatModelEl.classList.add('hidden');
+  if (chatGearEl) chatGearEl.classList.remove('on');
+  if (chatModelInputEl) chatModelInputEl.value = '';
+  clearTimeout(chatModelSearchTimer);
 }
 
 function startChatPlaceholder() {
@@ -753,13 +805,15 @@ export const ui = {
 
   // ── the Commons (live chat: talk + /build) ───────────────────────────────
 
-  initChat({ models, expanded, onSend, onBuild, onReport, onExpand }) {
+  initChat({ models, expanded, onSend, onBuild, onReport, onExpand, onModelSearch }) {
     chatEl = $('chat');
     chatFeedEl = $('chat-feed');
     chatInputEl = $('chat-input');
     chatBuildEl = $('chat-build');
     chatGearEl = $('chat-gear');
     chatModelEl = $('chat-model');
+    chatModelInputEl = $('chat-model-input');
+    chatModelListEl = $('chat-model-list');
     chatAcEl = $('chat-ac');
     chatSuggestEl = $('chat-suggest');
     chatCountEl = $('chat-count');
@@ -767,13 +821,25 @@ export const ui = {
     chatOnBuild = onBuild;
     chatOnReport = onReport;
     chatOnExpand = onExpand;
+    chatOnModelSearch = onModelSearch;
 
-    chatModelEl.replaceChildren(...(models || []).map(({ id, label, blurb }) => {
-      const opt = document.createElement('option');
-      opt.value = id;
-      opt.textContent = blurb ? `${label} — ${blurb}` : label;
-      return opt;
-    }));
+    // ── model picker: a searchable combobox over the featured lineup + the
+    // whole OpenRouter catalog (type to search) ──
+    chatFeaturedModels = Array.isArray(models) ? models : [];
+    if (chatFeaturedModels.length) selectChatModel(chatFeaturedModels[0]);
+    renderModelList(chatFeaturedModels);
+    chatModelInputEl.addEventListener('input', () => {
+      const q = chatModelInputEl.value.trim();
+      clearTimeout(chatModelSearchTimer);
+      if (!q) { renderModelList(chatFeaturedModels); return; }
+      chatModelSearchTimer = setTimeout(async () => {
+        let hits = [];
+        if (chatOnModelSearch) { try { hits = await chatOnModelSearch(q); } catch { hits = []; } }
+        // still relevant? (user may have typed on)
+        if (chatModelInputEl.value.trim() === q) renderModelList(hits.length ? hits : chatFeaturedModels, q);
+      }, 280);
+    });
+    chatModelInputEl.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModelPicker(); });
 
     // ── submit: one input that chats AND builds ──
     const doBuild = (prompt) => {
@@ -844,8 +910,7 @@ export const ui = {
     });
 
     chatGearEl.addEventListener('click', () => {
-      const open = chatModelEl.classList.toggle('hidden') === false;
-      chatGearEl.classList.toggle('on', open);
+      if (chatModelEl.classList.contains('hidden')) openModelPicker(); else closeModelPicker();
       audio.ui();
     });
 
@@ -948,7 +1013,7 @@ export const ui = {
   },
 
   getChatModel() {
-    return chatModelEl ? chatModelEl.value : '';
+    return selectedModelId || (chatFeaturedModels[0] && chatFeaturedModels[0].id) || '';
   },
 
   get chatExpanded() {

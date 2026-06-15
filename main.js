@@ -617,14 +617,25 @@ async function onChatBuild(model, prompt) {
       reqBody.ox = anchor.ox;
       reqBody.oz = anchor.oz;
     }
-    const res = await fetch(API_BASE + '/api/build', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(reqBody),
-    });
+    // some models are slow — cap the wait so a hang gives a clean message
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 70000);
+    let res;
+    try {
+      res = await fetch(API_BASE + '/api/build', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(reqBody),
+        signal: ctl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     data = await res.json();
-  } catch {
-    ui.chatSys('the foundry is resting — try again');
+  } catch (err) {
+    ui.chatSys(err && err.name === 'AbortError'
+      ? 'that model took too long — try a faster one'
+      : 'the foundry is resting — try again');
     ui.setChatBuildBusy(false);
     return;
   }
@@ -665,6 +676,13 @@ fetch(API_BASE + '/api/models')
       onBuild: onChatBuild,
       onReport: (mid) => presence.report(mid),
       onExpand: () => ensureAudioAndMusic(),
+      onModelSearch: async (q) => {
+        try {
+          const r = await fetch(API_BASE + '/api/models?q=' + encodeURIComponent(q));
+          const d = await r.json();
+          return Array.isArray(d.models) ? d.models : [];
+        } catch { return []; }
+      },
     });
   });
 

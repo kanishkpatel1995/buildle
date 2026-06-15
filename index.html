@@ -146,7 +146,11 @@
           </svg>
         </button>
       </div>
-      <select id="chat-model" class="hidden" aria-label="builder model"></select>
+      <div id="chat-model" class="hidden">
+        <input id="chat-model-input" type="text" autocomplete="off" autocapitalize="off"
+               spellcheck="false" placeholder="search any model…" aria-label="builder model" />
+        <div id="chat-model-list" role="listbox" aria-label="models"></div>
+      </div>
     </div>
   </div>
 
