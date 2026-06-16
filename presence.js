@@ -203,9 +203,15 @@ export function createPresence({ scene, reducedMotion = false }) {
     else if (msg.t === 'leave') beginLeave(msg.id);
     // ── live chat (rides the same socket) ──
     else if (msg.t === 'msg') { if (api.onChat) api.onChat(msg); }
-    else if (msg.t === 'log') { if (api.onChatLog) api.onChatLog(Array.isArray(msg.msgs) ? msg.msgs : []); }
+    else if (msg.t === 'log') { if (api.onChatLog) api.onChatLog(Array.isArray(msg.msgs) ? msg.msgs : [], !!msg.more); }
+    else if (msg.t === 'history') { if (api.onChatHistory) api.onChatHistory(Array.isArray(msg.msgs) ? msg.msgs : [], !!msg.more); }
     else if (msg.t === 'hide') { if (api.onChatHide) api.onChatHide(msg.mid); }
     else if (msg.t === 'sys') { if (api.onChatSys) api.onChatSys(msg.text); }
+  }
+
+  // Ask the server for older chat lines (id < before) — scroll-up pagination.
+  function loadHistory(before) {
+    if (Number.isFinite(before)) safeSend({ t: 'history', before });
   }
 
   // Send a chat line / build announcement to the room. kind ∈ chat|build|note|
@@ -620,9 +626,11 @@ export function createPresence({ scene, reducedMotion = false }) {
     update,
     say,
     report,
+    loadHistory,
     onNote: null,               // settable (y, colorIndex) for remote notes — unused v1
     onChat: null,               // settable: (msg) for an incoming chat line
-    onChatLog: null,            // settable: (msgs[]) recent history on join
+    onChatLog: null,            // settable: (msgs[], more) recent history on join
+    onChatHistory: null,        // settable: (msgs[], more) older page from scroll-up
     onChatHide: null,           // settable: (mid) a line was shadow-hidden
     onChatSys: null,            // settable: (text) a private system notice
     get count() { return totalCount; },

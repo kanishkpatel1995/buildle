@@ -56,13 +56,23 @@ let chatFeaturedModels = [];
 let chatModelSearchTimer = 0;
 let selectedModelId = '';
 let selectedModelLabel = '';
+let userPickedModel = false;   // true once the player chooses a model by hand
 let chatOnSend = null, chatOnBuild = null, chatOnReport = null, chatOnExpand = null;
+let chatOnLoadHistory = null;
+// Chat events (the join replay, live lines, history pages) can arrive on the
+// socket before initChat has wired up chatFeedEl. Buffer anything that lands
+// early and flush it in order once the feed exists — otherwise the join replay
+// is silently dropped and history looks like it never persisted.
+let chatPending = [];
+let chatOldestCid = Infinity;   // smallest durable row id loaded (pagination cursor)
+let chatHasMore = false;        // older history exists on the server to page in
+let chatLoadingHistory = false;
 let chatExpanded = false;
 let chatBuildBusy = false;
 let chatPlaceholderTimer = 0;
 let chatPlaceholderIdx = 0;
 let chatSuggestTimer = 0;
-const CHAT_ROWS_MAX = 90;           // DOM rows kept; older ones are pruned
+const CHAT_ROWS_MAX = 800;          // live-feed DOM cap (only trims when at bottom; paging can exceed it)
 const CHAT_NAME_MAX = 16;
 
 // Distinct, warm-but-readable hues for name colouring (hashed per sender id).
@@ -151,6 +161,20 @@ function buildChatRow(msg, noAnim) {
 function scrollChatToEnd() {
   if (chatFeedEl) chatFeedEl.scrollTop = chatFeedEl.scrollHeight;
 }
+function isNearChatBottom() {
+  if (!chatFeedEl) return true;
+  return chatFeedEl.scrollHeight - chatFeedEl.scrollTop - chatFeedEl.clientHeight < 80;
+}
+// If the open feed doesn't fill its height but older history exists, pull one
+// more page so there's something to scroll up into (the no-overflow case).
+function maybeAutofillHistory() {
+  if (!chatFeedEl || !chatExpanded) return;
+  if (chatHasMore && !chatLoadingHistory && Number.isFinite(chatOldestCid) &&
+      chatFeedEl.clientHeight > 0 && chatFeedEl.scrollHeight <= chatFeedEl.clientHeight + 8) {
+    chatLoadingHistory = true;
+    if (chatOnLoadHistory) chatOnLoadHistory(chatOldestCid);
+  }
+}
 
 function markChatUnread() {
   const b = $('btn-chat');
@@ -228,7 +252,7 @@ function renderModelList(list, q) {
     const sub = document.createElement('span'); sub.className = 'ml-sub'; sub.textContent = m.blurb || m.id;
     b.append(lab, sub);
     b.addEventListener('mousedown', (e) => e.preventDefault());   // don't blur the input
-    b.addEventListener('click', () => { selectChatModel(m); closeModelPicker(); });
+    b.addEventListener('click', () => { userPickedModel = true; selectChatModel(m); closeModelPicker(); });
     return b;
   }));
   if (!items.length) {
@@ -805,7 +829,7 @@ export const ui = {
 
   // ── the Commons (live chat: talk + /build) ───────────────────────────────
 
-  initChat({ models, expanded, onSend, onBuild, onReport, onExpand, onModelSearch }) {
+  initChat({ models, expanded, onSend, onBuild, onReport, onExpand, onModelSearch, onLoadHistory }) {
     chatEl = $('chat');
     chatFeedEl = $('chat-feed');
     chatInputEl = $('chat-input');
@@ -822,6 +846,7 @@ export const ui = {
     chatOnReport = onReport;
     chatOnExpand = onExpand;
     chatOnModelSearch = onModelSearch;
+    chatOnLoadHistory = onLoadHistory;
 
     // ── model picker: a searchable combobox over the featured lineup + the
     // whole OpenRouter catalog (type to search) ──
@@ -934,6 +959,14 @@ export const ui = {
       }
     });
 
+    // scroll to the top → page in older history (it's permanent on the server)
+    chatFeedEl.addEventListener('scroll', () => {
+      if (chatFeedEl.scrollTop <= 48 && chatHasMore && !chatLoadingHistory && Number.isFinite(chatOldestCid)) {
+        chatLoadingHistory = true;
+        if (chatOnLoadHistory) chatOnLoadHistory(chatOldestCid);
+      }
+    }, { passive: true });
+
     // keep the composer above the on-screen keyboard (phones)
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', syncChatViewport);
@@ -944,6 +977,27 @@ export const ui = {
     document.body.classList.toggle('chat-expanded', chatExpanded);
     syncChatToggleAria();
     startChatPlaceholder();
+
+    // flush anything the socket delivered before the feed was ready (the join
+    // replay almost always wins that race), in arrival order
+    if (chatPending.length) {
+      const queued = chatPending;
+      chatPending = [];
+      for (const ev of queued) {
+        if (ev[0] === 'log') this.chatLog(ev[1], ev[2]);
+        else if (ev[0] === 'history') this.chatHistory(ev[1], ev[2]);
+        else this.chatPush(ev[1]);
+      }
+    }
+  },
+
+  // Swap in the real model lineup once /api/models resolves (initChat runs with
+  // a small fallback so the chat is live instantly, even if that fetch is slow).
+  setModels(models) {
+    if (!Array.isArray(models) || !models.length) return;
+    chatFeaturedModels = models;
+    if (!userPickedModel) selectChatModel(chatFeaturedModels[0]);   // adopt the real default
+    if (chatModelInputEl && !chatModelInputEl.value.trim()) renderModelList(chatFeaturedModels);
   },
 
   // Toggle the chat between shown and fully hidden. The 💬 action button and the
@@ -960,6 +1014,7 @@ export const ui = {
       // focus to chat (opens the keyboard on phones — that's the intent here)
       if (chatInputEl) requestAnimationFrame(() => chatInputEl.focus({ preventScroll: true }));
       scrollChatToEnd();
+      maybeAutofillHistory();   // pull older history if the feed doesn't fill yet
     } else if (chatInputEl) {
       chatInputEl.blur();
       if (chatEl) chatEl.style.bottom = '';   // drop any stale keyboard offset
@@ -968,26 +1023,60 @@ export const ui = {
     return chatExpanded;
   },
 
-  // Append one message. msg = { mid, id, name, text, kind, ts }.
+  // Append one live message. msg = { cid, mid, id, name, text, kind, ts }.
   chatPush(msg) {
-    if (!chatFeedEl || !msg) return;
-    const row = buildChatRow(msg);
-    chatFeedEl.appendChild(row);
-    while (chatFeedEl.childElementCount > CHAT_ROWS_MAX) chatFeedEl.firstElementChild.remove();
-    scrollChatToEnd();
+    if (!msg) return;
+    if (!chatFeedEl) { chatPending.push(['push', msg]); return; }
+    if (typeof msg.cid === 'number') chatOldestCid = Math.min(chatOldestCid, msg.cid);
+    const atBottom = isNearChatBottom();
+    chatFeedEl.appendChild(buildChatRow(msg));
+    // only trim / auto-scroll when the reader is at the bottom, so paging back
+    // through old history is never yanked or pruned out from under them
+    if (atBottom) {
+      while (chatFeedEl.childElementCount > CHAT_ROWS_MAX) chatFeedEl.firstElementChild.remove();
+      scrollChatToEnd();
+    }
     if (!chatExpanded && msg.kind !== 'join' && msg.kind !== 'leave') markChatUnread();
   },
 
-  // Replay a batch (recent history on join) without per-row animation noise.
-  chatLog(msgs) {
-    if (!chatFeedEl) return;
+  // Replay the recent batch on join. more = older history exists to page in.
+  chatLog(msgs, more) {
+    if (!chatFeedEl) { chatPending.push(['log', msgs, more]); return; }
     chatFeedEl.replaceChildren();
-    if (Array.isArray(msgs)) for (const m of msgs) chatFeedEl.appendChild(buildChatRow(m, true));
+    chatOldestCid = Infinity;
+    if (Array.isArray(msgs)) for (const m of msgs) {
+      if (typeof m.cid === 'number') chatOldestCid = Math.min(chatOldestCid, m.cid);
+      chatFeedEl.appendChild(buildChatRow(m, true));
+    }
+    chatHasMore = !!more;
+    chatLoadingHistory = false;
     scrollChatToEnd();
+    maybeAutofillHistory();
+  },
+
+  // Prepend an older page (scroll-up pagination), keeping the viewport anchored.
+  chatHistory(msgs, more) {
+    if (!chatFeedEl) { chatPending.push(['history', msgs, more]); return; }
+    chatLoadingHistory = false;
+    chatHasMore = !!more;
+    if (!Array.isArray(msgs) || !msgs.length) { maybeAutofillHistory(); return; }
+    const prevH = chatFeedEl.scrollHeight;
+    const prevT = chatFeedEl.scrollTop;
+    const frag = document.createDocumentFragment();
+    for (const m of msgs) {
+      if (typeof m.cid === 'number') chatOldestCid = Math.min(chatOldestCid, m.cid);
+      frag.appendChild(buildChatRow(m, true));
+    }
+    chatFeedEl.insertBefore(frag, chatFeedEl.querySelector('.chat-row'));
+    chatFeedEl.scrollTop = prevT + (chatFeedEl.scrollHeight - prevH);
+    maybeAutofillHistory();
   },
 
   chatReset() {
     if (chatFeedEl) chatFeedEl.replaceChildren();
+    chatOldestCid = Infinity;
+    chatHasMore = false;
+    chatLoadingHistory = false;
   },
 
   chatHide(mid) {

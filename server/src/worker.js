@@ -53,7 +53,8 @@ const PRESENCE_BODY_MAX = 63;    // palette colour index ceiling (generous)
 // --- live chat (rides the same per-island presence socket) ---
 const CHAT_MAX = 240;            // chars per line after sanitising
 const CHAT_RING = 50;            // recent lines replayed to a new arrival
-const CHAT_PERSIST = 400;        // lines kept durably per island (survive reload/eviction)
+const CHAT_PAGE = 40;            // older lines returned per scroll-up pagination request
+// Chat history is kept FOREVER (never pruned) and paged in as the user scrolls up.
 const CHAT_WINDOW_MS = 10000;    // rolling rate-limit window
 const CHAT_BURST = 8;            // most lines allowed inside that window
 const CHAT_GAP_MS = 600;         // floor between two consecutive lines
@@ -1023,9 +1024,9 @@ export class PresenceDO {
       this.sql = ctx.storage.sql;
       this.sql.exec('CREATE TABLE IF NOT EXISTS chat(id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT, name TEXT, text TEXT, kind TEXT, ts INTEGER)');
       const rows = this.sql.exec(
-        'SELECT mid, name, text, kind, ts FROM chat ORDER BY id DESC LIMIT ?', CHAT_RING,
+        'SELECT id, mid, name, text, kind, ts FROM chat ORDER BY id DESC LIMIT ?', CHAT_RING,
       ).toArray().reverse();
-      this.chatRing = rows.map((r) => ({ t: 'msg', mid: r.mid, id: '', name: r.name, text: r.text, kind: r.kind, ts: r.ts }));
+      this.chatRing = rows.map((r) => ({ t: 'msg', cid: r.id, mid: r.mid, id: '', name: r.name, text: r.text, kind: r.kind, ts: r.ts }));
       const mx = this.sql.exec('SELECT MAX(id) AS m FROM chat').toArray()[0];
       this.msgSeq = (mx && mx.m) ? mx.m : 0;
     } catch {
@@ -1141,8 +1142,16 @@ export class PresenceDO {
       peer.uid = typeof msg.uid === 'string' && msg.uid ? msg.uid.slice(0, 64) : null;
       peer.updated = Date.now();
       try { ws.serializeAttachment({ id: peer.id, name: peer.name, body: peer.body, uid: peer.uid }); } catch { /* ignore */ }
-      // Replay recent chat to this arrival only, then announce them once.
-      try { ws.send(JSON.stringify({ t: 'log', msgs: this.chatRing })); } catch { /* socket died */ }
+      // Replay recent chat to this arrival only (more=true if older history exists
+      // to page in), then announce them once.
+      let more = false;
+      if (this.sql) {
+        try {
+          const n = this.sql.exec('SELECT COUNT(*) AS n FROM chat').toArray()[0].n;
+          more = n > this.chatRing.length;
+        } catch { /* ignore */ }
+      }
+      try { ws.send(JSON.stringify({ t: 'log', msgs: this.chatRing, more })); } catch { /* socket died */ }
       if (!peer.joined) {
         peer.joined = true;
         this.sysLine('join', peer.name, 'wandered in');
@@ -1152,6 +1161,7 @@ export class PresenceDO {
     }
     if (msg.t === 'chat') { this.handleChat(peer, msg); return; }
     if (msg.t === 'report') { this.handleReport(peer, msg); return; }
+    if (msg.t === 'history') { this.handleHistory(ws, msg); return; }
     if (msg.t === 'state') {
       const p = msg.p;
       if (Array.isArray(p) && p.length === 3 &&
@@ -1219,17 +1229,41 @@ export class PresenceDO {
   emitMsg(peer, text, kind) {
     const ts = Date.now();
     const mid = peer.id + '-' + (++this.msgSeq).toString(36);
-    const out = { t: 'msg', mid, id: peer.id, name: peer.name, text, kind, ts };
-    this.chatRing.push(out);
-    if (this.chatRing.length > CHAT_RING) this.chatRing.shift();
-    // persist (durable across reloads/eviction), pruning to the last CHAT_PERSIST
+    // persist permanently (history is never pruned — messages stay forever) and
+    // stamp the durable row id (cid) so clients can paginate older messages.
+    let cid = null;
     if (this.sql) {
       try {
         this.sql.exec('INSERT INTO chat(mid, name, text, kind, ts) VALUES(?,?,?,?,?)', mid, peer.name, text, kind, ts);
-        this.sql.exec('DELETE FROM chat WHERE id <= (SELECT MAX(id) FROM chat) - ?', CHAT_PERSIST);
+        const r = this.sql.exec('SELECT last_insert_rowid() AS id').toArray()[0];
+        cid = r ? Number(r.id) : null;
       } catch { /* best-effort; the in-memory ring still serves */ }
     }
+    const out = { t: 'msg', cid, mid, id: peer.id, name: peer.name, text, kind, ts };
+    this.chatRing.push(out);
+    if (this.chatRing.length > CHAT_RING) this.chatRing.shift();
     this.broadcast(JSON.stringify(out));
+  }
+
+  // Pagination: a client scrolled to the top and wants older lines. Returns the
+  // page of messages with id < before (oldest-first), plus whether more remain.
+  // Sent only to the asking socket. History is permanent, so this can page all
+  // the way back to the very first message.
+  handleHistory(ws, msg) {
+    let rows = [];
+    const before = Number(msg && msg.before);
+    if (this.sql && Number.isFinite(before) && before > 1) {
+      try {
+        rows = this.sql.exec(
+          'SELECT id, mid, name, text, kind, ts FROM chat WHERE id < ? ORDER BY id DESC LIMIT ?',
+          before, CHAT_PAGE + 1,
+        ).toArray();
+      } catch { rows = []; }
+    }
+    const more = rows.length > CHAT_PAGE;
+    const page = rows.slice(0, CHAT_PAGE).reverse();   // oldest-first for prepending
+    const msgs = page.map((r) => ({ t: 'msg', cid: r.id, mid: r.mid, id: '', name: r.name, text: r.text, kind: r.kind, ts: r.ts }));
+    try { ws.send(JSON.stringify({ t: 'history', msgs, more })); } catch { /* socket gone */ }
   }
 
   // Ephemeral system lines (join/leave) — broadcast but never kept in the ring,

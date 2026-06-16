@@ -662,33 +662,42 @@ async function onChatBuild(model, prompt) {
   ui.setChatBuildBusy(false);
 }
 
-// Load the model lineup from the API (falls back to a single model offline),
-// then wire up the chat — one input that talks AND builds.
+// Wire up the chat IMMEDIATELY so the feed exists before the presence socket's
+// join replay arrives — otherwise that first batch of history races the (async)
+// model fetch and gets dropped, which reads as "chat doesn't persist". The real
+// model lineup loads right after and swaps in via ui.setModels.
+ui.initChat({
+  models: foundryModels,   // a small fallback; replaced by setModels below
+  expanded: window.matchMedia('(min-width: 760px)').matches,
+  onSend: onChatSend,
+  onBuild: onChatBuild,
+  onReport: (mid) => presence.report(mid),
+  onExpand: () => ensureAudioAndMusic(),
+  onModelSearch: async (q) => {
+    try {
+      const r = await fetch(API_BASE + '/api/models?q=' + encodeURIComponent(q));
+      const d = await r.json();
+      return Array.isArray(d.models) ? d.models : [];
+    } catch { return []; }
+  },
+  onLoadHistory: (before) => presence.loadHistory(before),
+});
+
+// Load the featured lineup from the API (the chat already works without it).
 fetch(API_BASE + '/api/models')
   .then((r) => r.json())
-  .then((d) => { if (d && Array.isArray(d.models) && d.models.length) foundryModels = d.models; })
-  .catch(() => {})
-  .finally(() => {
-    ui.initChat({
-      models: foundryModels,
-      expanded: window.matchMedia('(min-width: 760px)').matches,
-      onSend: onChatSend,
-      onBuild: onChatBuild,
-      onReport: (mid) => presence.report(mid),
-      onExpand: () => ensureAudioAndMusic(),
-      onModelSearch: async (q) => {
-        try {
-          const r = await fetch(API_BASE + '/api/models?q=' + encodeURIComponent(q));
-          const d = await r.json();
-          return Array.isArray(d.models) ? d.models : [];
-        } catch { return []; }
-      },
-    });
-  });
+  .then((d) => {
+    if (d && Array.isArray(d.models) && d.models.length) {
+      foundryModels = d.models;
+      ui.setModels(foundryModels);
+    }
+  })
+  .catch(() => {});
 
 // Stream the room's chat into the feed; the presence socket carries it all.
 presence.onChat = (m) => ui.chatPush(m);
-presence.onChatLog = (msgs) => ui.chatLog(msgs);
+presence.onChatLog = (msgs, more) => ui.chatLog(msgs, more);
+presence.onChatHistory = (msgs, more) => ui.chatHistory(msgs, more);
 presence.onChatHide = (mid) => ui.chatHide(mid);
 presence.onChatSys = (text) => ui.chatSys(text);
 

@@ -1076,7 +1076,6 @@ body.filming #chat {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
   gap: 3px;
   padding: 0 var(--space-2);
   pointer-events: auto;
@@ -1086,6 +1085,12 @@ body.filming #chat {
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 14%);
 }
+/* Pin the feed to the bottom WITHOUT justify-content:flex-end — that variant
+   spills overflow out the top where it can't be scrolled to (the older history
+   becomes unreachable). An auto top-margin on the first row sticks a short feed
+   to the bottom, then collapses to 0 once the feed overflows, so scrolling up
+   into older lines works normally. */
+#chat-feed > :first-child { margin-top: auto; }
 #chat-feed::-webkit-scrollbar { width: 6px; }
 #chat-feed::-webkit-scrollbar-thumb {
   background: rgba(247, 241, 232, 0.22);
