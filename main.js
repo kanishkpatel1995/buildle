@@ -765,6 +765,11 @@ for (let dx = 0; dx < 3; dx++) for (let dy = 0; dy < 3; dy++) for (let dz = 0; d
   if (!corner) BRUSH_3.push([dx, dy, dz]);
 }
 function brushOffsets() { return brushSize === 3 ? BRUSH_3 : brushSize === 2 ? BRUSH_2 : BRUSH_1; }
+// Eraser state: a drag wipes blocks continuously, so we remember the last cell
+// cleared (skip re-clearing it every move) and rate-limit the remove sound.
+let lastEraseKey = '';
+let lastEraseSoundT = 0;
+let eraseHintShown = false;
 let modalOpen = false;              // movement keys pause behind modal overlays
 let lastPointerType = 'mouse';
 let pointerInside = false;
@@ -871,6 +876,50 @@ function placeBrushAt(cx, cy, cz, colorIndex) {
   return placed;
 }
 
+// Erase the active brush as a centred cube around the targeted block. Brush 1 =
+// the single block (as before); 2 → 2×2×2; 3 → a full 3×3×3 (27). A full cube,
+// not the rounded build blob — when you wipe, you expect the whole chunk gone,
+// and removals don't spend the shared build budget. Returns the count removed.
+function removeBrushAt(cx, cy, cz) {
+  const n = brushSize;
+  const h = (n - 1) >> 1;   // centre the cube on the target (0,0,1 for n=1,2,3)
+  let removed = 0;
+  for (let dx = 0; dx < n; dx++) for (let dy = 0; dy < n; dy++) for (let dz = 0; dz < n; dz++) {
+    const x = cx + dx - h, y = cy + dy - h, z = cz + dz - h;
+    if (y < 0 || y >= WORLD_HEIGHT) continue;
+    if (!world.canRemove(x, y, z)) continue;       // skip island/protected cells
+    const prev = world.get(x, y, z);
+    if (!prev) continue;
+    if (world.remove(x, y, z)) {
+      sync.sendRemove(x, y, z, { c: prev.c, m: prev.m, n: prev.n });
+      removed++;
+    }
+  }
+  return removed;
+}
+
+// Feedback for a removal, with the sound rate-limited so a fast drag-wipe
+// doesn't machine-gun the click.
+function eraseFeedback() {
+  const now = performance.now();
+  if (now - lastEraseSoundT > 80) { audio.remove(); music.duck(); lastEraseSoundT = now; }
+}
+
+// Drag-wipe: erase the brush at whatever block is under the pointer, but only
+// when the targeted cell changed since the last wipe (so one drag clears a
+// swath without re-hitting the same spot every frame).
+function eraseSweepTo(clientX, clientY) {
+  if (views.mode !== 'follow' || voyage.active || !activeWorld.buildable) return;
+  const hit = pickAt(clientX, clientY);
+  if (!hit || !hit.removeCell || !hit.inRange) return;
+  const { x, y, z } = hit.removeCell;
+  if (!world.canRemove(x, y, z)) return;
+  const key = x + ',' + y + ',' + z;
+  if (key === lastEraseKey) return;
+  lastEraseKey = key;
+  if (removeBrushAt(x, y, z)) eraseFeedback();
+}
+
 function pickAt(clientX, clientY) {
   _ndc.set((clientX / window.innerWidth) * 2 - 1, -(clientY / window.innerHeight) * 2 + 1);
   _raycaster.setFromCamera(_ndc, player.camera);
@@ -961,12 +1010,8 @@ function attemptRemove(clientX, clientY) {
   if (!hit.inRange) { ui.toast('too far away — walk closer'); return; }
   const { x, y, z } = hit.removeCell;
   if (!world.canRemove(x, y, z)) { ui.toast("that one's part of the island"); return; }
-  const prev = world.get(x, y, z);
-  if (world.remove(x, y, z)) {
-    sync.sendRemove(x, y, z, prev && { c: prev.c, m: prev.m, n: prev.n });
-    audio.remove();
-    music.duck();
-  }
+  lastEraseKey = x + ',' + y + ',' + z;   // seed the drag-wipe so a held tap doesn't re-clear here
+  if (removeBrushAt(x, y, z)) eraseFeedback();
 }
 
 function selectColor(i) {
@@ -987,6 +1032,10 @@ function selectEraseMode() {
   mode = 'erase';
   ui.selectErase();
   audio.ui();
+  if (!eraseHintShown) {
+    eraseHintShown = true;
+    ui.toast('eraser — drag to wipe; bigger brush clears more');
+  }
 }
 
 function collectLooks() {
@@ -996,6 +1045,7 @@ function collectLooks() {
 }
 
 function touchDown(e) {
+  lastEraseKey = '';   // a fresh touch starts a fresh wipe
   const p = {
     role: 'look', x0: e.clientX, y0: e.clientY, lx: e.clientX, ly: e.clientY,
     t0: performance.now(), travel: 0, consumed: false, timer: 0, shown: false,
@@ -1035,6 +1085,7 @@ function onPointerDown(e) {
   mouse.button = e.button;
   mouse.x0 = e.clientX; mouse.y0 = e.clientY;
   mouse.lx = e.clientX; mouse.ly = e.clientY;
+  lastEraseKey = '';   // a fresh press starts a fresh wipe
 }
 
 function onPointerMove(e) {
@@ -1046,9 +1097,16 @@ function onPointerMove(e) {
     const dx = e.clientX - mouse.lx, dy = e.clientY - mouse.ly;
     mouse.lx = e.clientX; mouse.ly = e.clientY;
     if (!mouse.dragging && Math.hypot(e.clientX - mouse.x0, e.clientY - mouse.y0) > DRAG_PX) mouse.dragging = true;
-    if (mouse.dragging && mouse.button === 0) {
-      if (views.mode !== 'follow') views.orbit(dx, dy);
-      else player.orbit(dx, dy);
+    if (mouse.dragging) {
+      // In erase mode a left-drag wipes blocks (right-drag still orbits, so you
+      // keep camera control); otherwise a left-drag orbits as usual.
+      const wiping = mode === 'erase' && mouse.button === 0 &&
+        views.mode === 'follow' && !voyage.active && activeWorld.buildable;
+      if (wiping) eraseSweepTo(e.clientX, e.clientY);
+      else if (mouse.button === 0 || (mode === 'erase' && mouse.button === 2)) {
+        if (views.mode !== 'follow') views.orbit(dx, dy);
+        else player.orbit(dx, dy);
+      }
     }
     return;
   }
@@ -1083,6 +1141,10 @@ function onPointerMove(e) {
     pinchDist = d;
   } else if (views.mode !== 'follow') {
     views.orbit(dx, dy);
+  } else if (mode === 'erase' && !voyage.active && activeWorld.buildable) {
+    // drag-wipe instead of look-orbit while the eraser is armed
+    eraseSweepTo(e.clientX, e.clientY);
+    p.consumed = true;   // a wipe-drag never also builds/erases on release
   } else {
     player.orbit(dx, dy);
   }
@@ -1171,12 +1233,14 @@ function updateGhost(t) {
   if (lastPointerType !== 'touch' && pointerInside && !(mouse.down && mouse.dragging) && !contextLost &&
       views.mode === 'follow' && !voyage.active && activeWorld.buildable) {
     if (mode === 'erase') {
-      // a red ghost over the block under the cursor that's removable
+      // a red ghost sized to the brush footprint, over the removable block
       const hit = pickAt(mouse.x, mouse.y);
       if (hit && hit.removeCell && hit.inRange &&
           world.canRemove(hit.removeCell.x, hit.removeCell.y, hit.removeCell.z)) {
         const { x, y, z } = hit.removeCell;
-        ghost.position.set(x + 0.5, y + 0.5, z + 0.5);
+        const n = brushSize, h = (n - 1) >> 1;   // matches removeBrushAt's centred cube
+        ghost.scale.setScalar(n);
+        ghost.position.set(x - h + n / 2, y - h + n / 2, z - h + n / 2);
         ghostMat.color.copy(ERASE_GHOST_COLOR);
         ghostMat.opacity = reducedMotion ? 0.45 : 0.4 + 0.12 * Math.sin(t * 4);
         visible = true;
@@ -1190,6 +1254,7 @@ function updateGhost(t) {
       if (hit && hit.placeCell && hit.inRange && !(hit.block && hit.block.m)) {
         const { x, y, z } = hit.placeCell;
         if (world.canPlace(x, y, z) && !player.overlapsCell(x, y, z)) {
+          ghost.scale.setScalar(1);   // build ghost stays a single cell (brush unchanged here)
           ghost.position.set(x + 0.5, y + 0.5, z + 0.5);
           ghostMat.color.copy(PALETTE_COLORS[mode === 'message' ? GLOW_INDEX : selectedColor]);
           ghostMat.opacity = reducedMotion ? 0.4 : 0.34 + 0.1 * Math.sin(t * 3);

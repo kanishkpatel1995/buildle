@@ -571,8 +571,8 @@ export const ui = {
     eraseSlotEl = document.createElement('button');
     eraseSlotEl.type = 'button';
     eraseSlotEl.className = 'swatch erase-slot';
-    eraseSlotEl.title = 'erase blocks';
-    eraseSlotEl.setAttribute('aria-label', 'erase blocks');
+    eraseSlotEl.title = 'erase — drag to wipe, brush size clears more';
+    eraseSlotEl.setAttribute('aria-label', 'erase blocks — drag to wipe, brush size clears more');
     eraseSlotEl.innerHTML = ERASER_SVG;
     eraseSlotEl.addEventListener('click', () => {
       applySelection('erase');
